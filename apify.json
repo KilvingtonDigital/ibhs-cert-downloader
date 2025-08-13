@@ -1,0 +1,64 @@
+{
+  "actorSpecification": 1,
+  "name": "ibhs-cert-downloader",
+  "title": "IBHS Certificate Downloader (Search by Address)",
+  "version": "0.1",
+  "buildTag": "latest",
+  "dockerfile": "Dockerfile",
+  "input": {
+    "title": "Input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+      "loginUrl": {
+        "title": "Login URL",
+        "type": "string",
+        "default": "https://app.ibhs.org/fh",
+        "editor": "textfield",
+        "description": "Starting URL for the IBHS app login page."
+      },
+      "addresses": {
+        "title": "Addresses (one per line)",
+        "type": "string",
+        "editor": "textarea",
+        "default": "520 Novatan Rd S, Mobile, AL 36608",
+        "description": "Paste one full address per line."
+      },
+      "maxAddressesPerRun": {
+        "title": "Max addresses per run",
+        "type": "integer",
+        "minimum": 1,
+        "default": 1,
+        "editor": "number",
+        "description": "How many addresses to process per run."
+      },
+      "politeDelayMs": {
+        "title": "Baseline delay (ms)",
+        "type": "integer",
+        "default": 800,
+        "editor": "number",
+        "description": "Base delay (with random jitter) between actions."
+      },
+      "debug": {
+        "title": "Debug mode (headed & snapshots)",
+        "type": "boolean",
+        "default": false,
+        "editor": "hidden",
+        "description": "When true, runs Playwright headed and saves snapshots."
+      },
+      "username": {
+        "title": "IBHS username (LOCAL TEST ONLY)",
+        "type": "string",
+        "editor": "textfield",
+        "description": "Local runs only. In Cloud, set IBHS_USERNAME secret."
+      },
+      "password": {
+        "title": "IBHS password (LOCAL TEST ONLY)",
+        "type": "string",
+        "editor": "textfield",
+        "description": "Local runs only. In Cloud, set IBHS_PASSWORD secret."
+      }
+    },
+    "required": ["addresses"]
+  }
+}

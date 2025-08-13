@@ -1,0 +1,9 @@
+{
+  "loginUrl": "https://app.ibhs.org/fh",
+  "addresses": "520 Novatan Rd S",
+  "maxAddressesPerRun": 1,
+  "politeDelayMs": 900,
+  "debug": true,
+  "username": "Knockoutinspections@gmail.com",
+  "password": "Sunni1122!"
+}

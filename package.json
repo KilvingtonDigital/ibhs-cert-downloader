@@ -1,0 +1,13 @@
+{
+  "name": "ibhs-cert-downloader",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "dependencies": {
+    "apify": "^3.4.4",
+    "googleapis": "^140.0.1",
+    "playwright": "^1.47.2"
+  }
+}
