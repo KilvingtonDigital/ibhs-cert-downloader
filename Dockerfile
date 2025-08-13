@@ -1,4 +1,4 @@
-FROM apify/actor-node-playwright-chrome:1.0.0
+FROM apify/actor-node-playwright-chrome
 
 COPY package*.json ./
 RUN npm ci --omit=dev
