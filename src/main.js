@@ -46,7 +46,7 @@ async function uploadToGoogleDrive(buffer, fileName, mimeType = 'application/pdf
     return null;
   }
 
-  // Apify secrets often store newlines escaped as \n; unescape
+  // Apify secrets store newlines as \n — unescape them.
   privateKey = privateKey.replace(/\\n/g, '\n');
 
   const jwt = new google.auth.JWT({
@@ -58,6 +58,7 @@ async function uploadToGoogleDrive(buffer, fileName, mimeType = 'application/pdf
 
   const drive = google.drive({ version: 'v3', auth: jwt });
   const media = { mimeType, body: Readable.from(buffer) };
+
   const res = await drive.files.create({
     requestBody: { name: fileName, parents: [folderId] },
     media,
@@ -179,7 +180,7 @@ async function openFirstResult(page, addr, { politeDelayMs, debug }) {
   if (await exact.count()) {
     await exact.click();
   } else if (rowCount > 1) {
-    await rowCandidates.nth(1).click();
+    await rowCandidates.nth(1).click(); // skip header
   } else if (linkCount > 0) {
     await linkCandidates.first().click();
   } else {
