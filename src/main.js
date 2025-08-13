@@ -21,6 +21,14 @@ const normalizeAddress = (s = '') =>
 function sanitizeFileName(name) {
   return name.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 180);
 }
+
+// Apify KVS keys must be a-zA-Z0-9!-_.'() and <= 256 chars
+function kvSafeKey(name) {
+  return (name || '')
+    .replace(/[^a-zA-Z0-9!\-_\.'()]+/g, '-') // replace anything illegal with '-'
+    .slice(0, 250); // keep room for .pdf
+}
+
 async function streamToBuffer(stream) {
   const chunks = [];
   for await (const c of stream) chunks.push(c);
@@ -198,7 +206,7 @@ async function downloadCertificate({ page, context, key, debug }) {
 
   const downloadButton = page.getByText(/^\s*Download\s*$/i).first();
 
-  // Prepare all possible completion signals *before* clicking
+  // Prepare possible completion signals *before* clicking
   const downloadPromise = page.waitForEvent('download', { timeout: 120_000 }).then(d => ({ kind: 'download', d })).catch(() => null);
   const popupPromise    = page.waitForEvent('popup',    { timeout: 120_000 }).then(p => ({ kind: 'popup', p })).catch(() => null);
   const responsePromise = page.waitForResponse(
@@ -398,28 +406,36 @@ async function run() {
         }
       } catch {}
 
-      const fileName = sanitizeFileName(
-        `${key}${expires ? ` - Expires ${expires}` : ''}.pdf`.replace(/\s+/g, ' ')
-      );
+      // Build names
+      const basePretty = `${key}${expires ? ` - Expires ${expires}` : ''}`.replace(/\s+/g, ' ');
+      const prettyName = sanitizeFileName(`${basePretty}.pdf`);
+      const kvName = kvSafeKey(`${key}-certificate.pdf`);
 
       // Save to Apify KV (canonical)
-      await Actor.setValue(fileName, buffer, { contentType: 'application/pdf' });
+      if (!buffer || buffer.length === 0) {
+        log.warning(`PDF buffer empty for ${key}; not saving.`);
+      } else {
+        await Actor.setValue(kvName, buffer, { contentType: 'application/pdf' });
+        log.info(`Saved to KVS: ${kvName} (${buffer.length} bytes)`);
+      }
 
       // Also mirror to ./downloads (local dev) and to Windows Downloads when present
       try {
         const repoDownloads = path.join(process.cwd(), 'downloads');
         await fs.mkdir(repoDownloads, { recursive: true });
-        await fs.writeFile(path.join(repoDownloads, fileName), buffer);
-        log.info(`Saved (repo): ${path.join(repoDownloads, fileName)}`);
+        if (buffer && buffer.length > 0) {
+          await fs.writeFile(path.join(repoDownloads, prettyName), buffer);
+          log.info(`Saved (repo): ${path.join(repoDownloads, prettyName)}`);
+        }
       } catch (e) {
         log.warning(`Could not save to ./downloads: ${e.message}`);
       }
       try {
         const userDownloads = path.join(process.env.USERPROFILE || '', 'Downloads');
-        if (userDownloads) {
+        if (userDownloads && buffer && buffer.length > 0) {
           await fs.mkdir(userDownloads, { recursive: true });
-          await fs.writeFile(path.join(userDownloads, fileName), buffer);
-          log.info(`Saved (Windows Downloads): ${path.join(userDownloads, fileName)}`);
+          await fs.writeFile(path.join(userDownloads, prettyName), buffer);
+          log.info(`Saved (Windows Downloads): ${path.join(userDownloads, prettyName)}`);
         }
       } catch (e) {
         // Cloud environment won't have USERPROFILE; that's fine.
@@ -427,17 +443,18 @@ async function run() {
 
       // Upload to Google Drive folder (Cloud-native target)
       try {
-        const uploaded = await uploadToGoogleDrive(buffer, fileName);
-        if (uploaded?.id) {
-          log.info(`Uploaded to Google Drive: ${uploaded.webViewLink || uploaded.id}`);
+        if (buffer && buffer.length > 0) {
+          const uploaded = await uploadToGoogleDrive(buffer, prettyName);
+          if (uploaded?.id) log.info(`Uploaded to Google Drive: ${uploaded.webViewLink || uploaded.id}`);
+          else log.warning('Google Drive upload skipped or failed (no file id returned).');
         } else {
-          log.warning('Google Drive upload skipped or failed (no file id returned).');
+          log.warning('Skipping Drive upload (empty buffer).');
         }
       } catch (e) {
         log.warning(`Google Drive upload error: ${e.message}`);
       }
 
-      processed[key] = { status: 'downloaded', file: fileName, when: new Date().toISOString() };
+      processed[key] = { status: buffer && buffer.length > 0 ? 'downloaded' : 'empty_pdf', file: kvName, when: new Date().toISOString() };
       await saveProcessed(processed);
 
       // Brief pause
