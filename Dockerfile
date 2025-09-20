@@ -1,17 +1,17 @@
-# Use Apify’s Playwright+Chrome image (browsers already baked in)
+# Use Apify’s Playwright + Chrome base image
 FROM apify/actor-node-playwright-chrome
 
-# IMPORTANT: Use the preinstalled browsers, don’t download again
-ENV PLAYWRIGHT_BROWSERS_PATH=/usr/lib/playwright
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-
-# Install app deps
+# Copy package manifests and install dependencies first (better caching)
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# App code + actor spec
+# ✅ Install the matching Playwright browsers for the version in your package-lock.json
+# This downloads Chromium into the container image so it’s available at runtime.
+RUN npx playwright install --with-deps chromium
+
+# Copy app code and actor spec
 COPY ./src ./src
 COPY ./apify.json ./apify.json
 
-# Start
+# Start the actor
 CMD ["npm", "start"]
