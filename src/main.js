@@ -1,10 +1,8 @@
-// src/main.js - Complete Updated Version with Fixed Result Clicking
+// src/main.js - Simplified Version (Apify Storage Only)
 import { Actor, log } from 'apify';
 import { chromium } from 'playwright';
 import fs from 'fs/promises';
 import path from 'path';
-import { Readable } from 'stream';
-import { google } from 'googleapis';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base, spread = 350) => base + Math.floor(Math.random() * spread);
@@ -34,13 +32,11 @@ async function debugPageState(page, step) {
     log.info(`🔍 Search elements - type=search: ${searchElements[0]}, placeholder: ${searchElements[1]}, aria-label: ${searchElements[2]}`);
     log.info(`📝 Total inputs: ${searchElements[3]}, Total buttons: ${searchElements[4]}`);
     
-    if (step !== 'QUICK_CHECK') {
-      // Take screenshot only for important steps
-      const png = await page.screenshot({ fullPage: true });
-      const screenshotKey = `debug-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
-      await Actor.setValue(screenshotKey, png, { contentType: 'image/png' });
-      log.info(`📸 Screenshot saved as: ${screenshotKey}`);
-    }
+    // Take screenshot for important steps
+    const png = await page.screenshot({ fullPage: true });
+    const screenshotKey = `debug-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
+    await Actor.setValue(screenshotKey, png, { contentType: 'image/png' });
+    log.info(`📸 Screenshot saved as: ${screenshotKey}`);
     
   } catch (e) {
     log.error(`❌ Debug failed: ${e.message}`);
@@ -72,48 +68,6 @@ async function streamToBuffer(stream) {
   const chunks = [];
   for await (const c of stream) chunks.push(c);
   return Buffer.concat(chunks);
-}
-
-// === GOOGLE DRIVE INTEGRATION ===
-async function uploadToGoogleDrive(buffer, fileName, mimeType = 'application/pdf') {
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
-  const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  let privateKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
-
-  if (!folderId || !clientEmail || !privateKey) {
-    log.warning('Google Drive env not fully configured; skipping Drive upload.');
-    return null;
-  }
-
-  privateKey = privateKey.replace(/\\n/g, '\n');
-
-  const jwt = new google.auth.JWT({
-    email: clientEmail,
-    key: privateKey,
-    scopes: ['https://www.googleapis.com/auth/drive.file'],
-  });
-  
-  try {
-    await jwt.authorize();
-    const drive = google.drive({ version: 'v3', auth: jwt });
-    const media = { mimeType, body: Readable.from(buffer) };
-
-    const res = await drive.files.create({
-      requestBody: { 
-        name: fileName, 
-        parents: [folderId],
-        description: `IBHS Certificate - Generated ${new Date().toISOString()}`
-      },
-      media,
-      fields: 'id, webViewLink, webContentLink, name, size',
-    });
-    
-    log.info(`✅ Google Drive upload successful: ${res.data.name}`);
-    return res.data;
-  } catch (error) {
-    log.error(`❌ Google Drive upload failed: ${error.message}`);
-    throw error;
-  }
 }
 
 // === LOGIN FUNCTION ===
@@ -167,8 +121,8 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
   await sleep(jitter(politeDelayMs));
 }
 
-// === UPDATED SEARCH AND EXTRACT FUNCTION ===
-async function searchAndExtractCertificate(page, address, { politeDelayMs, debug, returnStructuredData }) {
+// === SIMPLIFIED SEARCH AND EXTRACT FUNCTION ===
+async function searchAndExtractCertificate(page, address, { politeDelayMs, debug }) {
   const key = normalizeAddress(address);
   log.info(`🎯 Processing address: ${address}`);
 
@@ -222,271 +176,169 @@ async function searchAndExtractCertificate(page, address, { politeDelayMs, debug
 
   if (debug) await debugPageState(page, 'AFTER_SEARCH');
 
-  // OPEN FIRST RESULT - IMPROVED VERSION
-  await debugPageState(page, 'SEARCH_RESULTS_FOUND');
-
-  // Wait for results to stabilize
+  // Wait for results and check if we found anything
   await page.waitForTimeout(3000);
-
-  // Check if we have any results
-  const hasResults = await Promise.race([
-    page.locator('tr, [role="row"]').count().then(count => count > 1),
-    page.locator('text=/no results/i, text=/not found/i').count().then(count => count === 0)
-  ]);
-
-  if (!hasResults) {
+  
+  const resultsCount = await page.locator('tr, [role="row"]').count();
+  log.info(`Found ${resultsCount} rows in results`);
+  
+  if (resultsCount <= 1) {
     throw new Error('No search results found for this address');
   }
 
-  // Try multiple strategies to access the certificate
-  let accessSuccessful = false;
-  const streetNumber = address.split(',')[0].trim();
-
-  // Strategy 1: Look for direct download button (sometimes results show download immediately)
-  const directDownload = page.locator('text=/download/i, [title*="download" i]').first();
-  if (await directDownload.count() > 0 && await directDownload.isVisible()) {
-    log.info('📥 Found direct download button in results');
-    accessSuccessful = true;
-  }
-
-  if (!accessSuccessful) {
-    // Strategy 2: Click on the address text
-    const addressLink = page.getByText(streetNumber, { exact: false }).first();
-    if (await addressLink.count() > 0 && await addressLink.isVisible()) {
-      try {
-        log.info('📍 Clicking on address link...');
-        await addressLink.click({ timeout: 10000 });
-        await page.waitForLoadState('networkidle', { timeout: 30000 });
-        accessSuccessful = true;
-      } catch (e) {
-        log.info(`Address click failed: ${e.message}`);
-      }
-    }
-  }
-
-  if (!accessSuccessful) {
-    // Strategy 3: Click on certificate ID if visible
-    const certElements = await page.locator('text=/FH\\d+/, [title*="FH"], [data-testid*="fortified"]').all();
-    for (const cert of certElements) {
-      if (await cert.isVisible()) {
-        try {
-          log.info('🆔 Clicking on certificate ID...');
-          await cert.click({ timeout: 10000 });
-          await page.waitForLoadState('networkidle', { timeout: 30000 });
-          accessSuccessful = true;
-          break;
-        } catch (e) {
-          continue;
-        }
-      }
-    }
-  }
-
-  if (!accessSuccessful) {
-    // Strategy 4: Try clicking on table cells that contain our address
-    const tableCells = page.locator('td, th').filter({ hasText: streetNumber });
-    const cellCount = await tableCells.count();
+  // Look for download button in results - sometimes it's directly available
+  await debugPageState(page, 'CHECKING_FOR_DOWNLOAD');
+  
+  let downloadButton = page.locator('text=/download/i, [title*="download" i], button:has-text("Download")').first();
+  
+  if (!(await downloadButton.count()) || !(await downloadButton.isVisible())) {
+    log.info('⚠️ No immediate download button found, trying to click on result...');
     
-    for (let i = 0; i < cellCount; i++) {
+    // Try to click on something in the results to get to the detail view
+    const streetNumber = address.split(',')[0].trim();
+    const clickTargets = [
+      page.locator(`text="${streetNumber}"`).first(),
+      page.locator('tr').nth(1).locator('td').first(),
+      page.locator('tr').nth(1),
+      page.locator('a').first()
+    ];
+    
+    let clickSuccessful = false;
+    for (const target of clickTargets) {
       try {
-        const cell = tableCells.nth(i);
-        if (await cell.isVisible()) {
-          log.info(`📋 Clicking on table cell ${i + 1}...`);
-          await cell.click({ timeout: 10000 });
+        if (await target.count() > 0 && await target.isVisible()) {
+          log.info(`🎯 Attempting to click on result element...`);
+          await target.click({ timeout: 10000 });
           await page.waitForLoadState('networkidle', { timeout: 30000 });
-          accessSuccessful = true;
+          clickSuccessful = true;
           break;
         }
       } catch (e) {
+        log.info(`Click attempt failed: ${e.message}`);
         continue;
       }
     }
-  }
-
-  if (!accessSuccessful) {
-    // Strategy 5: Click anywhere in the row containing our address
-    const rows = page.locator('tr, [role="row"]').filter({ hasText: streetNumber });
-    const rowCount = await rows.count();
     
-    for (let i = 0; i < Math.min(rowCount, 3); i++) {
-      try {
-        const row = rows.nth(i);
-        if (await row.isVisible()) {
-          log.info(`📄 Clicking on result row ${i + 1}...`);
-          
-          // Try clicking on different parts of the row
-          const clickableElements = [
-            row.locator('a').first(),
-            row.locator('button').first(), 
-            row.locator('td').first(),
-            row
-          ];
-          
-          for (const element of clickableElements) {
-            try {
-              if (await element.count() > 0 && await element.isVisible()) {
-                await element.click({ timeout: 8000 });
-                await page.waitForLoadState('networkidle', { timeout: 30000 });
-                accessSuccessful = true;
-                break;
-              }
-            } catch (e) {
-              continue;
-            }
-          }
-          
-          if (accessSuccessful) break;
-        }
-      } catch (e) {
-        continue;
-      }
+    if (!clickSuccessful) {
+      throw new Error('Could not click on any result element to access certificate details');
     }
+    
+    await debugPageState(page, 'AFTER_CLICKING_RESULT');
+    
+    // Now look for download button again
+    downloadButton = page.locator('text=/download/i, [title*="download" i], button:has-text("Download")').first();
   }
 
-  await debugPageState(page, 'AFTER_RESULT_INTERACTION');
-
-  // Check if we now have access to certificate details
-  const hasCertificateAccess = await Promise.race([
-    page.locator('text=/download/i').count().then(count => count > 0),
-    page.locator('text=/certificate/i').count().then(count => count > 0),
-    page.locator('[role="tab"]').filter({ hasText: /certificate/i }).count().then(count => count > 0)
-  ]);
-
-  if (!hasCertificateAccess) {
-    throw new Error('Could not access certificate details - no download or certificate section found');
-  }
-
-  // NAVIGATE TO CERTIFICATES SECTION (if needed)
-  let certControl = page.getByText(/^\s*Certificates?\s*$/i).first();
-  if (!(await certControl.count()) || !(await certControl.isVisible())) {
-    certControl = page.locator('[role="tab"], [role="link"], button, a')
-      .filter({ hasText: /Certificates?/i })
-      .first();
-  }
-
-  if (await certControl.count() && await certControl.isVisible()) {
-    log.info('🏛️ Navigating to Certificate section...');
-    await certControl.click();
-    await page.waitForLoadState('networkidle', { timeout: 60_000 });
+  // Check for certificate tab/section
+  const certTab = page.locator('[role="tab"], button, a').filter({ hasText: /certificate/i }).first();
+  if (await certTab.count() && await certTab.isVisible()) {
+    log.info('🏛️ Found certificate tab, clicking it...');
+    await certTab.click();
+    await page.waitForLoadState('networkidle', { timeout: 30000 });
     await sleep(jitter(300));
+    
+    // Update download button reference
+    downloadButton = page.locator('text=/download/i, [title*="download" i], button:has-text("Download")').first();
   }
 
-  await debugPageState(page, 'CERTIFICATE_SECTION');
+  await debugPageState(page, 'READY_FOR_DOWNLOAD');
 
-  // EXTRACT CERTIFICATE DATA
+  if (!(await downloadButton.count()) || !(await downloadButton.isVisible())) {
+    throw new Error('Download button not found after navigating to certificate section');
+  }
+
+  // EXTRACT CERTIFICATE DETAILS
   const certificateData = {
     address: address,
     searchKey: key,
     timestamp: new Date().toISOString(),
     status: 'found',
     certificateDetails: {},
-    downloadInfo: null,
-    googleDriveInfo: null
+    apifyStorageInfo: null
   };
 
-  // Extract certificate details
+  // Try to extract some details from the page
   try {
-    // Look for expiration date
-    const expElements = await page.locator('text=/expires/i, text=/expiration/i').all();
-    for (const exp of expElements) {
-      if (await exp.isVisible()) {
-        const expText = await exp.textContent();
-        certificateData.certificateDetails.expirationText = expText?.trim();
-        break;
-      }
-    }
-
     // Look for certificate ID
-    const certIdElements = await page.locator('text=/FH\\d+/, text=/certificate/i').allTextContents();
-    if (certIdElements.length > 0) {
-      certificateData.certificateDetails.certificateReferences = certIdElements;
+    const certIdText = await page.locator('text=/FH\\d+/').first().textContent().catch(() => '');
+    if (certIdText) {
+      certificateData.certificateDetails.certificateId = certIdText.trim();
     }
 
-    // Look for designation (Roof, etc.)
-    const designationElements = await page.locator('text=/roof/i, text=/designation/i').allTextContents();
-    if (designationElements.length > 0) {
-      certificateData.certificateDetails.designation = designationElements[0];
+    // Look for designation
+    const designationText = await page.locator('text=/roof/i, text=/wind/i, text=/impact/i').first().textContent().catch(() => '');
+    if (designationText) {
+      certificateData.certificateDetails.designation = designationText.trim();
+    }
+
+    // Look for expiration info
+    const expText = await page.locator('text=/expire/i').first().textContent().catch(() => '');
+    if (expText) {
+      certificateData.certificateDetails.expirationInfo = expText.trim();
     }
 
   } catch (e) {
-    log.warning(`Could not extract all certificate details: ${e.message}`);
+    log.warning(`Could not extract certificate details: ${e.message}`);
   }
 
-  // DOWNLOAD CERTIFICATE
-  const downloadButton = page.locator('text=/download/i, [title*="download" i], button:has-text("Download")').first();
-  
-  if (!(await downloadButton.count()) || !(await downloadButton.isVisible())) {
-    throw new Error('Download button not found or not visible');
-  }
-
+  // DOWNLOAD THE CERTIFICATE
   log.info('📥 Starting certificate download...');
   
   // Set up download handlers
-  const downloadPromise = page.waitForEvent('download', { timeout: 120_000 }).then(d => ({ kind: 'download', d })).catch(() => null);
+  const downloadPromise = page.waitForEvent('download', { timeout: 60_000 }).then(d => ({ kind: 'download', d })).catch(() => null);
   const responsePromise = page.waitForResponse(
     resp => (resp.headers()['content-type'] || '').toLowerCase().includes('application/pdf'),
-    { timeout: 120_000 }
+    { timeout: 60_000 }
   ).then(r => ({ kind: 'response', r })).catch(() => null);
 
   await downloadButton.click();
+  log.info('🖱️ Clicked download button, waiting for download...');
 
   const signal = await Promise.race([downloadPromise, responsePromise]);
+  
   if (!signal) {
-    // Wait a bit more and try again
-    await page.waitForTimeout(5000);
-    const signal2 = await Promise.race([downloadPromise, responsePromise]);
-    if (!signal2) {
-      throw new Error('Download did not start after clicking download button');
-    }
-    var actualSignal = signal2;
-  } else {
-    var actualSignal = signal;
+    throw new Error('Download did not start within 60 seconds');
   }
 
   let buffer = null;
-  if (actualSignal.kind === 'download') {
-    const stream = await actualSignal.d.createReadStream();
-    buffer = stream ? await streamToBuffer(stream) : await fs.readFile(await actualSignal.d.path());
-  } else if (actualSignal.kind === 'response') {
-    buffer = await actualSignal.r.body();
+  if (signal.kind === 'download') {
+    log.info('📂 Processing download event...');
+    try {
+      const stream = await signal.d.createReadStream();
+      buffer = stream ? await streamToBuffer(stream) : await fs.readFile(await signal.d.path());
+    } catch (e) {
+      log.warning(`Download stream failed, trying file path: ${e.message}`);
+      buffer = await fs.readFile(await signal.d.path());
+    }
+  } else if (signal.kind === 'response') {
+    log.info('📄 Processing PDF response...');
+    buffer = await signal.r.body();
   }
 
   if (!buffer || buffer.length === 0) {
-    throw new Error('Downloaded file is empty or could not be read');
+    throw new Error('Downloaded file is empty');
   }
 
-  log.info(`✅ Certificate downloaded: ${buffer.length} bytes`);
+  log.info(`✅ Certificate downloaded successfully: ${buffer.length} bytes`);
 
-  // UPLOAD TO GOOGLE DRIVE
+  // SAVE TO APIFY STORAGE
   const fileName = sanitizeFileName(`IBHS_Certificate_${key}_${Date.now()}.pdf`);
-  
-  try {
-    const driveFile = await uploadToGoogleDrive(buffer, fileName);
-    if (driveFile) {
-      certificateData.googleDriveInfo = {
-        fileId: driveFile.id,
-        fileName: driveFile.name,
-        webViewLink: driveFile.webViewLink,
-        webContentLink: driveFile.webContentLink,
-        size: driveFile.size,
-        uploadedAt: new Date().toISOString()
-      };
-      log.info(`✅ Uploaded to Google Drive: ${driveFile.webViewLink}`);
-    }
-  } catch (e) {
-    log.warning(`Google Drive upload failed: ${e.message}`);
-    certificateData.googleDriveInfo = { error: e.message };
-  }
-
-  // SAVE TO APIFY STORAGE (backup)
   const kvName = kvSafeKey(`${key}-certificate.pdf`);
-  await Actor.setValue(kvName, buffer, { contentType: 'application/pdf' });
   
-  certificateData.downloadInfo = {
+  await Actor.setValue(kvName, buffer, { contentType: 'application/pdf' });
+  log.info(`💾 Saved to Apify storage: ${kvName}`);
+
+  // Create download URL for n8n to use
+  const apifyStorageUrl = `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${kvName}`;
+  
+  certificateData.apifyStorageInfo = {
+    keyValueStoreId: Actor.getEnv().defaultKeyValueStoreId,
+    key: kvName,
     fileName: fileName,
-    apifyKey: kvName,
+    downloadUrl: apifyStorageUrl,
     fileSize: buffer.length,
-    downloadedAt: new Date().toISOString()
+    contentType: 'application/pdf',
+    savedAt: new Date().toISOString()
   };
 
   return certificateData;
@@ -502,7 +354,6 @@ async function run() {
     address = '',
     politeDelayMs = 800,
     debug = false,
-    returnStructuredData = true,
     username: usernameFromInput,
     password: passwordFromInput,
   } = input;
@@ -518,7 +369,7 @@ async function run() {
   }
 
   if (!targetAddress) {
-    throw new Error('No address provided. Use "address" field for single address.');
+    throw new Error('No address provided. Use "address" field.');
   }
 
   const username = usernameFromInput || process.env.IBHS_USERNAME;
@@ -548,15 +399,14 @@ async function run() {
     await ensureLoggedIn(page, { loginUrl, username, password, politeDelayMs, debug });
 
     // Search and extract certificate
-    const result = await searchAndExtractCertificate(page, targetAddress, { politeDelayMs, debug, returnStructuredData });
+    const result = await searchAndExtractCertificate(page, targetAddress, { politeDelayMs, debug });
     
     log.info(`🎉 Successfully processed: ${targetAddress}`);
+    log.info(`📁 PDF available at: ${result.apifyStorageInfo.downloadUrl}`);
     
-    // Push structured data to dataset for n8n to consume
-    if (returnStructuredData) {
-      await Actor.pushData(result);
-      log.info('📊 Structured data pushed to dataset');
-    }
+    // Push structured data to dataset for n8n
+    await Actor.pushData(result);
+    log.info('📊 Result data pushed to dataset');
 
     // Also save to key-value store for easy access
     await Actor.setValue('latest-result', result);
@@ -573,14 +423,10 @@ async function run() {
       status: 'failed',
       error: error.message,
       certificateDetails: null,
-      downloadInfo: null,
-      googleDriveInfo: null
+      apifyStorageInfo: null
     };
 
-    if (returnStructuredData) {
-      await Actor.pushData(errorResult);
-    }
-    
+    await Actor.pushData(errorResult);
     await Actor.setValue('latest-result', errorResult);
     
     throw error;
