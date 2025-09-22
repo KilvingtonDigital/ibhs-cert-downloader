@@ -9,6 +9,71 @@ import { google } from 'googleapis';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (base, spread = 350) => base + Math.floor(Math.random() * spread);
 
+// === ENHANCED DEBUG FUNCTIONS ===
+async function debugPageState(page, step) {
+  const timestamp = new Date().toISOString();
+  log.info(`🔍 === DEBUG ${step} at ${timestamp} ===`);
+  
+  try {
+    // Basic page info
+    const url = page.url();
+    const title = await page.title();
+    log.info(`📍 URL: ${url}`);
+    log.info(`📄 Title: ${title}`);
+    
+    // Check for login indicators (to see if we're still on login page)
+    const loginElements = await page.locator('input[type="email"], input[type="password"], [text*="sign in" i], [text*="log in" i]').count();
+    log.info(`🔐 Login elements found: ${loginElements}`);
+    
+    // Check for search-related elements
+    const searchElements = await Promise.all([
+      page.locator('input[type="search"]').count(),
+      page.locator('[placeholder*="search" i]').count(),
+      page.locator('[aria-label*="search" i]').count(),
+      page.locator('input').count(),
+      page.locator('button, [role="button"]').count(),
+    ]);
+    
+    log.info(`🔍 Search elements - type=search: ${searchElements[0]}, placeholder: ${searchElements[1]}, aria-label: ${searchElements[2]}`);
+    log.info(`📝 Total inputs: ${searchElements[3]}, Total buttons: ${searchElements[4]}`);
+    
+    // Get all input elements with their attributes
+    const inputs = await page.locator('input').all();
+    for (let i = 0; i < Math.min(inputs.length, 5); i++) {
+      const input = inputs[i];
+      try {
+        const attrs = await input.evaluate(el => ({
+          type: el.type || 'text',
+          placeholder: el.placeholder || '',
+          name: el.name || '',
+          id: el.id || '',
+          visible: el.offsetParent !== null
+        }));
+        log.info(`  Input ${i}: ${JSON.stringify(attrs)}`);
+      } catch (e) {
+        log.info(`  Input ${i}: Could not read attributes`);
+      }
+    }
+    
+    // Take screenshot
+    const png = await page.screenshot({ fullPage: true });
+    const screenshotKey = `debug-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
+    await Actor.setValue(screenshotKey, png, { contentType: 'image/png' });
+    log.info(`📸 Screenshot saved as: ${screenshotKey}`);
+    
+    // Save HTML
+    const html = await page.content();
+    const htmlKey = `debug-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.html`;
+    await Actor.setValue(htmlKey, html, { contentType: 'text/html' });
+    log.info(`💾 HTML saved as: ${htmlKey}`);
+    
+  } catch (e) {
+    log.error(`❌ Debug failed: ${e.message}`);
+  }
+  
+  log.info(`🔍 === END DEBUG ${step} ===`);
+}
+
 // Normalize addresses
 const normalizeAddress = (s = '') =>
   s
@@ -34,10 +99,12 @@ async function streamToBuffer(stream) {
   for await (const c of stream) chunks.push(c);
   return Buffer.concat(chunks);
 }
+
 async function loadProcessed() {
   const store = await Actor.openKeyValueStore();
   return (await store.getValue('processed_by_address')) || {};
 }
+
 async function saveProcessed(map) {
   const store = await Actor.openKeyValueStore();
   await store.setValue('processed_by_address', map);
@@ -83,6 +150,7 @@ function safeKey(prefix, label, ext) {
     .slice(0, 80);
   return `${prefix}-${Date.now()}-${clean}.${ext}`;
 }
+
 async function snapshot(page, label) {
   try {
     const png = await page.screenshot({ fullPage: true });
@@ -118,25 +186,31 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
   const passSel   = 'input[type="password"], input[name="password"], input[autocomplete="current-password"]';
   const submitSel = 'button:has-text("Sign in"), button:has-text("Log in"), button[type="submit"], [type="submit"]';
 
+  log.info('🔑 Starting login process...');
   await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
   await page.waitForLoadState('networkidle', { timeout: 60_000 });
-  if (debug) await snapshot(page, 'login-loaded');
+  
+  if (debug) await debugPageState(page, 'LOGIN_PAGE_LOADED');
 
   if (await page.locator(emailSel).count()) {
+    log.info('📧 Filling email field...');
     await page.fill(emailSel, username);
     await sleep(jitter(200));
   }
   if (await page.locator(passSel).count()) {
+    log.info('🔒 Filling password field...');
     await page.fill(passSel, password);
     await sleep(jitter(200));
   }
 
+  log.info('🔘 Clicking login button...');
   if (await page.locator(submitSel).count()) {
     await page.click(submitSel);
   } else if (await page.locator(passSel).count()) {
     await page.press(passSel, 'Enter');
   }
 
+  log.info('⏳ Waiting for login to complete...');
   const loginGone = page.waitForSelector(emailSel, { state: 'detached', timeout: 30_000 }).catch(() => null);
   const appHint   = page.waitForSelector('text=/Certificates?|Search/i', { timeout: 30_000 }).catch(() => null);
   await Promise.race([loginGone, appHint]);
@@ -146,11 +220,13 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
     await page.waitForLoadState('networkidle', { timeout: 30_000 });
   }
 
-  if (debug) await snapshot(page, 'post-login');
+  if (debug) await debugPageState(page, 'POST_LOGIN');
+  
   if (await page.locator(emailSel).count()) {
     throw new Error('Login did not complete (email field still visible). Check credentials or selector.');
   }
 
+  log.info('✅ Login successful!');
   await sleep(jitter(politeDelayMs));
 }
 
@@ -329,23 +405,92 @@ async function run() {
       const addr = (raw || '').trim();
       const key = normalizeAddress(addr);
       if (!key) continue;
-      if (processed[key]) { log.info(`Skip (already processed): ${addr}`); continue; }
+      if (processed[key]) { 
+        log.info(`Skip (already processed): ${addr}`); 
+        continue; 
+      }
 
-      // SEARCH
-      const searchField = await openSearch(page);
-      if (!(await searchField.count())) {
+      log.info(`🎯 Processing address: ${addr}`);
+
+      // SEARCH (WITH DEBUG)
+      await debugPageState(page, 'BEFORE_SEARCH');
+
+      log.info(`🔍 Searching for: ${addr}`);
+
+      // Try to find search field
+      let searchField = null;
+      const strategies = [
+        () => page.locator('input[type="search"]').first(),
+        () => page.locator('[placeholder*="search" i]').first(),
+        () => page.locator('[aria-label*="search" i]').first(),
+        () => page.getByRole('searchbox').first(),
+        () => page.getByRole('textbox').first(),
+        () => page.locator('input').first()
+      ];
+
+      for (let i = 0; i < strategies.length; i++) {
+        try {
+          log.info(`🔍 Trying search strategy ${i + 1}...`);
+          const element = strategies[i]();
+          const count = await element.count();
+          
+          if (count > 0) {
+            const isVisible = await element.isVisible();
+            const isEnabled = await element.isEnabled();
+            log.info(`  Found ${count} elements, visible: ${isVisible}, enabled: ${isEnabled}`);
+            
+            if (isVisible && isEnabled) {
+              searchField = element;
+              log.info(`✅ Using search strategy ${i + 1}`);
+              break;
+            }
+          }
+        } catch (e) {
+          log.info(`  Strategy ${i + 1} failed: ${e.message}`);
+        }
+      }
+
+      if (!searchField) {
+        await debugPageState(page, 'NO_SEARCH_FIELD');
         log.warning('Search field not found; reloading shell once.');
         await page.reload({ waitUntil: 'networkidle' });
         await sleep(jitter(politeDelayMs));
+        
+        // Try one more time after reload
+        searchField = page.getByRole('textbox').first();
+        if (!(await searchField.count())) {
+          await debugPageState(page, 'STILL_NO_SEARCH_FIELD');
+          processed[key] = { status: 'no_search_field' };
+          await saveProcessed(processed);
+          handled++;
+          continue;
+        }
       }
-      const box = (await openSearch(page)) || page.getByRole('textbox').first();
-      await box.fill(addr);
-      await sleep(jitter(250));
-      await page.keyboard.press('Enter');
 
-      await page.waitForLoadState('networkidle', { timeout: 60_000 });
-      await sleep(jitter(politeDelayMs));
-      if (debug) await snapshot(page, `search-results-${key}`);
+      // Actually perform the search
+      try {
+        log.info(`📝 Filling search field with: ${addr}`);
+        await searchField.click();
+        await page.waitForTimeout(500);
+        await searchField.fill(addr);
+        await sleep(jitter(500));
+        
+        log.info(`⌨️ Pressing Enter to search...`);
+        await page.keyboard.press('Enter');
+        
+        await page.waitForLoadState('networkidle', { timeout: 60_000 });
+        await sleep(jitter(politeDelayMs));
+        
+        await debugPageState(page, 'AFTER_SEARCH');
+        
+      } catch (searchError) {
+        log.error(`❌ Search failed: ${searchError.message}`);
+        await debugPageState(page, 'SEARCH_ERROR');
+        processed[key] = { status: 'search_failed', error: searchError.message };
+        await saveProcessed(processed);
+        handled++;
+        continue;
+      }
 
       // OPEN FIRST RESULT
       try {
