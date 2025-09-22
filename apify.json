@@ -1,8 +1,8 @@
 {
   "actorSpecification": 1,
   "name": "ibhs-cert-downloader",
-  "title": "IBHS Certificate Downloader (Search by Address)",
-  "version": "0.1",
+  "title": "IBHS Certificate Downloader (n8n Ready)",
+  "version": "0.2",
   "buildTag": "latest",
   "dockerfile": "Dockerfile",
   "input": {
@@ -17,20 +17,12 @@
         "editor": "textfield",
         "description": "Starting URL for the IBHS app login page."
       },
-      "addresses": {
-        "title": "Addresses (one per line)",
+      "address": {
+        "title": "Single Address",
         "type": "string",
-        "editor": "textarea",
+        "editor": "textfield",
         "default": "520 Novatan Rd S, Mobile, AL 36608",
-        "description": "Paste one full address per line."
-      },
-      "maxAddressesPerRun": {
-        "title": "Max addresses per run",
-        "type": "integer",
-        "minimum": 1,
-        "default": 1,
-        "editor": "number",
-        "description": "How many addresses to process per run."
+        "description": "Single address to search for (n8n will pass this dynamically)."
       },
       "politeDelayMs": {
         "title": "Baseline delay (ms)",
@@ -43,8 +35,15 @@
         "title": "Debug mode (headed & snapshots)",
         "type": "boolean",
         "default": false,
-        "editor": "hidden",
+        "editor": "checkbox",
         "description": "When true, runs Playwright headed and saves snapshots."
+      },
+      "returnStructuredData": {
+        "title": "Return structured data",
+        "type": "boolean",
+        "default": true,
+        "editor": "checkbox",
+        "description": "Return certificate data as structured JSON for n8n to process."
       },
       "username": {
         "title": "IBHS username (LOCAL TEST ONLY)",
@@ -59,6 +58,6 @@
         "description": "Local runs only. In Cloud, set IBHS_PASSWORD secret."
       }
     },
-    "required": ["addresses"]
+    "required": ["address"]
   }
 }
