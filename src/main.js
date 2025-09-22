@@ -1,4 +1,4 @@
-// src/main.js - n8n Ready Version
+// src/main.js - Complete Updated Version with Fixed Result Clicking
 import { Actor, log } from 'apify';
 import { chromium } from 'playwright';
 import fs from 'fs/promises';
@@ -167,7 +167,7 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
   await sleep(jitter(politeDelayMs));
 }
 
-// === SEARCH AND EXTRACT DATA ===
+// === UPDATED SEARCH AND EXTRACT FUNCTION ===
 async function searchAndExtractCertificate(page, address, { politeDelayMs, debug, returnStructuredData }) {
   const key = normalizeAddress(address);
   log.info(`🎯 Processing address: ${address}`);
@@ -222,42 +222,156 @@ async function searchAndExtractCertificate(page, address, { politeDelayMs, debug
 
   if (debug) await debugPageState(page, 'AFTER_SEARCH');
 
-  // OPEN FIRST RESULT
-  const streetFrag = address.split(',')[0].trim();
-  const safeFrag = streetFrag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // OPEN FIRST RESULT - IMPROVED VERSION
+  await debugPageState(page, 'SEARCH_RESULTS_FOUND');
 
-  // Wait for results
+  // Wait for results to stabilize
   await page.waitForTimeout(3000);
-  
-  const rowCandidates = page.locator('[role="row"], tr, [data-testid*="row"], .row, .list-item');
-  const rowCount = await rowCandidates.count();
-  
-  log.info(`Found ${rowCount} potential result rows`);
-  
-  if (rowCount <= 1) {
-    throw new Error('No search results found');
+
+  // Check if we have any results
+  const hasResults = await Promise.race([
+    page.locator('tr, [role="row"]').count().then(count => count > 1),
+    page.locator('text=/no results/i, text=/not found/i').count().then(count => count === 0)
+  ]);
+
+  if (!hasResults) {
+    throw new Error('No search results found for this address');
   }
 
-  // Click first result (skip header)
-  await rowCandidates.nth(1).click();
-  await page.waitForLoadState('networkidle', { timeout: 60_000 });
-  await sleep(jitter(politeDelayMs));
+  // Try multiple strategies to access the certificate
+  let accessSuccessful = false;
+  const streetNumber = address.split(',')[0].trim();
 
-  // NAVIGATE TO CERTIFICATES
+  // Strategy 1: Look for direct download button (sometimes results show download immediately)
+  const directDownload = page.locator('text=/download/i, [title*="download" i]').first();
+  if (await directDownload.count() > 0 && await directDownload.isVisible()) {
+    log.info('📥 Found direct download button in results');
+    accessSuccessful = true;
+  }
+
+  if (!accessSuccessful) {
+    // Strategy 2: Click on the address text
+    const addressLink = page.getByText(streetNumber, { exact: false }).first();
+    if (await addressLink.count() > 0 && await addressLink.isVisible()) {
+      try {
+        log.info('📍 Clicking on address link...');
+        await addressLink.click({ timeout: 10000 });
+        await page.waitForLoadState('networkidle', { timeout: 30000 });
+        accessSuccessful = true;
+      } catch (e) {
+        log.info(`Address click failed: ${e.message}`);
+      }
+    }
+  }
+
+  if (!accessSuccessful) {
+    // Strategy 3: Click on certificate ID if visible
+    const certElements = await page.locator('text=/FH\\d+/, [title*="FH"], [data-testid*="fortified"]').all();
+    for (const cert of certElements) {
+      if (await cert.isVisible()) {
+        try {
+          log.info('🆔 Clicking on certificate ID...');
+          await cert.click({ timeout: 10000 });
+          await page.waitForLoadState('networkidle', { timeout: 30000 });
+          accessSuccessful = true;
+          break;
+        } catch (e) {
+          continue;
+        }
+      }
+    }
+  }
+
+  if (!accessSuccessful) {
+    // Strategy 4: Try clicking on table cells that contain our address
+    const tableCells = page.locator('td, th').filter({ hasText: streetNumber });
+    const cellCount = await tableCells.count();
+    
+    for (let i = 0; i < cellCount; i++) {
+      try {
+        const cell = tableCells.nth(i);
+        if (await cell.isVisible()) {
+          log.info(`📋 Clicking on table cell ${i + 1}...`);
+          await cell.click({ timeout: 10000 });
+          await page.waitForLoadState('networkidle', { timeout: 30000 });
+          accessSuccessful = true;
+          break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  }
+
+  if (!accessSuccessful) {
+    // Strategy 5: Click anywhere in the row containing our address
+    const rows = page.locator('tr, [role="row"]').filter({ hasText: streetNumber });
+    const rowCount = await rows.count();
+    
+    for (let i = 0; i < Math.min(rowCount, 3); i++) {
+      try {
+        const row = rows.nth(i);
+        if (await row.isVisible()) {
+          log.info(`📄 Clicking on result row ${i + 1}...`);
+          
+          // Try clicking on different parts of the row
+          const clickableElements = [
+            row.locator('a').first(),
+            row.locator('button').first(), 
+            row.locator('td').first(),
+            row
+          ];
+          
+          for (const element of clickableElements) {
+            try {
+              if (await element.count() > 0 && await element.isVisible()) {
+                await element.click({ timeout: 8000 });
+                await page.waitForLoadState('networkidle', { timeout: 30000 });
+                accessSuccessful = true;
+                break;
+              }
+            } catch (e) {
+              continue;
+            }
+          }
+          
+          if (accessSuccessful) break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  }
+
+  await debugPageState(page, 'AFTER_RESULT_INTERACTION');
+
+  // Check if we now have access to certificate details
+  const hasCertificateAccess = await Promise.race([
+    page.locator('text=/download/i').count().then(count => count > 0),
+    page.locator('text=/certificate/i').count().then(count => count > 0),
+    page.locator('[role="tab"]').filter({ hasText: /certificate/i }).count().then(count => count > 0)
+  ]);
+
+  if (!hasCertificateAccess) {
+    throw new Error('Could not access certificate details - no download or certificate section found');
+  }
+
+  // NAVIGATE TO CERTIFICATES SECTION (if needed)
   let certControl = page.getByText(/^\s*Certificates?\s*$/i).first();
-  if (!(await certControl.count())) {
+  if (!(await certControl.count()) || !(await certControl.isVisible())) {
     certControl = page.locator('[role="tab"], [role="link"], button, a')
       .filter({ hasText: /Certificates?/i })
       .first();
   }
 
-  if (!(await certControl.count())) {
-    throw new Error('Certificate section not found');
+  if (await certControl.count() && await certControl.isVisible()) {
+    log.info('🏛️ Navigating to Certificate section...');
+    await certControl.click();
+    await page.waitForLoadState('networkidle', { timeout: 60_000 });
+    await sleep(jitter(300));
   }
 
-  await certControl.click();
-  await page.waitForLoadState('networkidle', { timeout: 60_000 });
-  await sleep(jitter(300));
+  await debugPageState(page, 'CERTIFICATE_SECTION');
 
   // EXTRACT CERTIFICATE DATA
   const certificateData = {
@@ -270,25 +384,28 @@ async function searchAndExtractCertificate(page, address, { politeDelayMs, debug
     googleDriveInfo: null
   };
 
-  // Try to extract certificate details
+  // Extract certificate details
   try {
     // Look for expiration date
-    const expLabel = page.getByText(/expires/i).first();
-    if (await expLabel.count()) {
-      const expText = await expLabel.textContent();
-      certificateData.certificateDetails.expirationText = expText;
+    const expElements = await page.locator('text=/expires/i, text=/expiration/i').all();
+    for (const exp of expElements) {
+      if (await exp.isVisible()) {
+        const expText = await exp.textContent();
+        certificateData.certificateDetails.expirationText = expText?.trim();
+        break;
+      }
     }
 
-    // Look for certificate number/ID
-    const certIdElements = await page.locator('text=/certificate/i').allTextContents();
+    // Look for certificate ID
+    const certIdElements = await page.locator('text=/FH\\d+/, text=/certificate/i').allTextContents();
     if (certIdElements.length > 0) {
       certificateData.certificateDetails.certificateReferences = certIdElements;
     }
 
-    // Look for property details
-    const propertyInfo = await page.locator('.property-info, .address-info, .building-info').first().textContent().catch(() => '');
-    if (propertyInfo) {
-      certificateData.certificateDetails.propertyInfo = propertyInfo.trim();
+    // Look for designation (Roof, etc.)
+    const designationElements = await page.locator('text=/roof/i, text=/designation/i').allTextContents();
+    if (designationElements.length > 0) {
+      certificateData.certificateDetails.designation = designationElements[0];
     }
 
   } catch (e) {
@@ -296,9 +413,10 @@ async function searchAndExtractCertificate(page, address, { politeDelayMs, debug
   }
 
   // DOWNLOAD CERTIFICATE
-  const downloadButton = page.getByText(/^\s*Download\s*$/i).first();
-  if (!(await downloadButton.count())) {
-    throw new Error('Download button not found');
+  const downloadButton = page.locator('text=/download/i, [title*="download" i], button:has-text("Download")').first();
+  
+  if (!(await downloadButton.count()) || !(await downloadButton.isVisible())) {
+    throw new Error('Download button not found or not visible');
   }
 
   log.info('📥 Starting certificate download...');
@@ -314,19 +432,27 @@ async function searchAndExtractCertificate(page, address, { politeDelayMs, debug
 
   const signal = await Promise.race([downloadPromise, responsePromise]);
   if (!signal) {
-    throw new Error('Download did not start');
+    // Wait a bit more and try again
+    await page.waitForTimeout(5000);
+    const signal2 = await Promise.race([downloadPromise, responsePromise]);
+    if (!signal2) {
+      throw new Error('Download did not start after clicking download button');
+    }
+    var actualSignal = signal2;
+  } else {
+    var actualSignal = signal;
   }
 
   let buffer = null;
-  if (signal.kind === 'download') {
-    const stream = await signal.d.createReadStream();
-    buffer = stream ? await streamToBuffer(stream) : await fs.readFile(await signal.d.path());
-  } else if (signal.kind === 'response') {
-    buffer = await signal.r.body();
+  if (actualSignal.kind === 'download') {
+    const stream = await actualSignal.d.createReadStream();
+    buffer = stream ? await streamToBuffer(stream) : await fs.readFile(await actualSignal.d.path());
+  } else if (actualSignal.kind === 'response') {
+    buffer = await actualSignal.r.body();
   }
 
   if (!buffer || buffer.length === 0) {
-    throw new Error('Downloaded file is empty');
+    throw new Error('Downloaded file is empty or could not be read');
   }
 
   log.info(`✅ Certificate downloaded: ${buffer.length} bytes`);
