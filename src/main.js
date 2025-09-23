@@ -362,6 +362,7 @@ async function run() {
     maxAddressesPerRun = 1,
     politeDelayMs = 800,
     debug = false,
+    returnStructuredData = true,
     username: usernameFromInput,
     password: passwordFromInput,
   } = input;
@@ -460,6 +461,18 @@ async function run() {
         searchField = page.getByRole('textbox').first();
         if (!(await searchField.count())) {
           await debugPageState(page, 'STILL_NO_SEARCH_FIELD');
+          
+          // DATASET OUTPUT: Record failure
+          if (returnStructuredData) {
+            await Actor.pushData({
+              address: addr,
+              searchAddress: key,
+              status: 'no_search_field',
+              error: 'Could not find search field on page',
+              processedAt: new Date().toISOString()
+            });
+          }
+          
           processed[key] = { status: 'no_search_field' };
           await saveProcessed(processed);
           handled++;
@@ -486,6 +499,18 @@ async function run() {
       } catch (searchError) {
         log.error(`❌ Search failed: ${searchError.message}`);
         await debugPageState(page, 'SEARCH_ERROR');
+        
+        // DATASET OUTPUT: Record search failure
+        if (returnStructuredData) {
+          await Actor.pushData({
+            address: addr,
+            searchAddress: key,
+            status: 'search_failed',
+            error: `Search failed: ${searchError.message}`,
+            processedAt: new Date().toISOString()
+          });
+        }
+        
         processed[key] = { status: 'search_failed', error: searchError.message };
         await saveProcessed(processed);
         handled++;
@@ -496,6 +521,17 @@ async function run() {
       try {
         await openFirstResult(page, addr, { politeDelayMs, debug });
       } catch {
+        // DATASET OUTPUT: Record no results
+        if (returnStructuredData) {
+          await Actor.pushData({
+            address: addr,
+            searchAddress: key,
+            status: 'no_results',
+            error: 'No search results found for address',
+            processedAt: new Date().toISOString()
+          });
+        }
+        
         processed[key] = { status: 'no_results' };
         await saveProcessed(processed);
         handled++;
@@ -516,6 +552,17 @@ async function run() {
         await sleep(jitter(300));
         if (debug) await snapshot(page, `detail-after-certificate-${key}`);
       } else {
+        // DATASET OUTPUT: Record no certificate section
+        if (returnStructuredData) {
+          await Actor.pushData({
+            address: addr,
+            searchAddress: key,
+            status: 'no_certificate',
+            error: 'No certificate section found on property page',
+            processedAt: new Date().toISOString()
+          });
+        }
+        
         processed[key] = { status: 'no_certificate' };
         await saveProcessed(processed);
         handled++;
@@ -530,6 +577,17 @@ async function run() {
         if (await downloadLike.count()) hasDownload = 1;
       }
       if (!hasDownload) {
+        // DATASET OUTPUT: Record no download button
+        if (returnStructuredData) {
+          await Actor.pushData({
+            address: addr,
+            searchAddress: key,
+            status: 'no_download',
+            error: 'No download button found for certificate',
+            processedAt: new Date().toISOString()
+          });
+        }
+        
         processed[key] = { status: 'no_download' };
         await saveProcessed(processed);
         handled++;
@@ -587,11 +645,18 @@ async function run() {
       }
 
       // Upload to Google Drive folder (Cloud-native target)
+      let driveFileId = null;
+      let driveWebViewLink = null;
       try {
         if (buffer && buffer.length > 0) {
           const uploaded = await uploadToGoogleDrive(buffer, prettyName);
-          if (uploaded?.id) log.info(`Uploaded to Google Drive: ${uploaded.webViewLink || uploaded.id}`);
-          else log.warning('Google Drive upload skipped or failed (no file id returned).');
+          if (uploaded?.id) {
+            driveFileId = uploaded.id;
+            driveWebViewLink = uploaded.webViewLink;
+            log.info(`Uploaded to Google Drive: ${uploaded.webViewLink || uploaded.id}`);
+          } else {
+            log.warning('Google Drive upload skipped or failed (no file id returned).');
+          }
         } else {
           log.warning('Skipping Drive upload (empty buffer).');
         }
@@ -599,7 +664,32 @@ async function run() {
         log.warning(`Google Drive upload error: ${e.message}`);
       }
 
-      processed[key] = { status: buffer && buffer.length > 0 ? 'downloaded' : 'empty_pdf', file: kvName, when: new Date().toISOString() };
+      const downloadStatus = buffer && buffer.length > 0 ? 'downloaded' : 'empty_pdf';
+      
+      // DATASET OUTPUT: Record successful download
+      if (returnStructuredData) {
+        await Actor.pushData({
+          address: addr,
+          searchAddress: key,
+          status: downloadStatus,
+          certificateFile: kvName,
+          fileName: prettyName,
+          fileSize: buffer ? buffer.length : 0,
+          expires: expires || null,
+          googleDriveFileId: driveFileId,
+          googleDriveLink: driveWebViewLink,
+          downloadedAt: new Date().toISOString(),
+          processedAt: new Date().toISOString()
+        });
+      }
+
+      processed[key] = { 
+        status: downloadStatus, 
+        file: kvName, 
+        when: new Date().toISOString(),
+        fileSize: buffer ? buffer.length : 0,
+        expires: expires || null
+      };
       await saveProcessed(processed);
 
       // Brief pause
