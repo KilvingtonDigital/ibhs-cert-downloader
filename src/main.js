@@ -172,12 +172,12 @@ async function openSearch(page) {
   const searchBtn = page.getByText(/^\s*search\s*$/i).first();
   if (await searchBtn.count()) {
     await searchBtn.click();
-    return page.getByRole('textbox').first();
+    return page.getByPlaceholder('Search');
   }
 
   // Common shortcut in React shells
   await page.keyboard.press('/');
-  return page.getByRole('textbox').first();
+  return page.getByPlaceholder('Search');
 }
 
 // --- Robust login ---
@@ -359,6 +359,7 @@ async function run() {
   const {
     loginUrl = 'https://app.ibhs.org/fh',
     addresses: rawAddresses = [],
+    address, // NEW: Single address from n8n
     maxAddressesPerRun = 1,
     politeDelayMs = 800,
     debug = false,
@@ -368,7 +369,11 @@ async function run() {
   } = input;
 
   let addresses = [];
-  if (Array.isArray(rawAddresses)) {
+  
+  // NEW: Handle single address (for n8n integration)
+  if (address && typeof address === 'string') {
+    addresses = [address.trim()];
+  } else if (Array.isArray(rawAddresses)) {
     addresses = rawAddresses;
   } else if (typeof rawAddresses === 'string') {
     addresses = rawAddresses.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
@@ -378,7 +383,7 @@ async function run() {
   const password = passwordFromInput || process.env.IBHS_PASSWORD;
 
   if (!username || !password) throw new Error('Missing credentials.');
-  if (!addresses.length) throw new Error('addresses[] is empty.');
+  if (!addresses.length) throw new Error('No addresses provided.');
 
   const processed = await loadProcessed();
 
@@ -418,15 +423,15 @@ async function run() {
 
       log.info(`🔍 Searching for: ${addr}`);
 
-      // Try to find search field
+      // Try to find search field - FIXED VERSION
       let searchField = null;
       const strategies = [
-        () => page.locator('input[type="search"]').first(),
-        () => page.locator('[placeholder*="search" i]').first(),
-        () => page.locator('[aria-label*="search" i]').first(),
-        () => page.getByRole('searchbox').first(),
-        () => page.getByRole('textbox').first(),
-        () => page.locator('input').first()
+        () => page.getByPlaceholder('Search'),
+        () => page.locator('input[type="search"][placeholder="Search"]'),
+        () => page.locator('#grid_1544421861_0_searchbar'),
+        () => page.locator('input[type="search"]').not('[aria-label="clipboard"]'),
+        () => page.locator('[placeholder*="search" i]').not('[aria-label="clipboard"]'),
+        () => page.locator('[aria-label*="search" i]').not('[aria-label="clipboard"]'),
       ];
 
       for (let i = 0; i < strategies.length; i++) {
@@ -457,8 +462,8 @@ async function run() {
         await page.reload({ waitUntil: 'networkidle' });
         await sleep(jitter(politeDelayMs));
         
-        // Try one more time after reload
-        searchField = page.getByRole('textbox').first();
+        // Try one more time after reload - use the specific search field
+        searchField = page.getByPlaceholder('Search');
         if (!(await searchField.count())) {
           await debugPageState(page, 'STILL_NO_SEARCH_FIELD');
           
