@@ -423,21 +423,30 @@ async function run() {
 
       log.info(`🔍 Searching for: ${addr}`);
 
+      // WAIT for the page to be fully interactive first
+      log.info('⏳ Waiting for page to be fully loaded...');
+      await page.waitForTimeout(3000); // Give the React app time to initialize
+      await page.waitForLoadState('networkidle');
+
       // Try to find search field - FIXED VERSION
       let searchField = null;
       const strategies = [
         () => page.getByPlaceholder('Search'),
         () => page.locator('input[type="search"][placeholder="Search"]'),
         () => page.locator('#grid_1544421861_0_searchbar'),
-        () => page.locator('input[type="search"]').not('[aria-label="clipboard"]'),
-        () => page.locator('[placeholder*="search" i]').not('[aria-label="clipboard"]'),
-        () => page.locator('[aria-label*="search" i]').not('[aria-label="clipboard"]'),
+        () => page.locator('input[type="search"]:not([aria-label="clipboard"])'),
+        () => page.locator('[placeholder*="search" i]:not([aria-label="clipboard"])'),
+        () => page.locator('[aria-label*="search" i]:not([aria-label="clipboard"])'),
       ];
 
       for (let i = 0; i < strategies.length; i++) {
         try {
           log.info(`🔍 Trying search strategy ${i + 1}...`);
           const element = strategies[i]();
+          
+          // Wait a bit for the element to appear
+          await element.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+          
           const count = await element.count();
           
           if (count > 0) {
