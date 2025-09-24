@@ -247,6 +247,9 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
 // --- Open first matching result after a search ---
 async function openFirstResult(page, addr, { politeDelayMs, debug }) {
   const streetFrag = addr.split(',')[0].trim();
+  const safeFrag = streetFrag.replace(/[.*+?^${}()|[\]\\]/g, '\\// --- Open first matching result after a search ---
+async function openFirstResult(page, addr, { politeDelayMs, debug }) {
+  const streetFrag = addr.split(',')[0].trim();
   const safeFrag = streetFrag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
   const containers = [
@@ -288,6 +291,78 @@ async function openFirstResult(page, addr, { politeDelayMs, debug }) {
   await page.waitForLoadState('networkidle', { timeout: 60_000 });
   await sleep(jitter(politeDelayMs));
   if (debug) await snapshot(page, `detail-after-opening-${streetFrag}`);
+}');
+
+  log.info('⏳ Waiting for search results to load...');
+  await page.waitForTimeout(2000); // Give results time to appear
+  
+  // Try multiple strategies to find and click the first result
+  const strategies = [
+    // Strategy 1: Look for the exact address text and click it
+    async () => {
+      const exact = page.getByText(new RegExp(`^\\s*${safeFrag}\\b`, 'i')).first();
+      if (await exact.count()) {
+        log.info(`✅ Found exact match: ${safeFrag}`);
+        await exact.click();
+        return true;
+      }
+      return false;
+    },
+    // Strategy 2: Click the first data row (skip header)
+    async () => {
+      const rows = page.locator('[role="row"], tr, .MuiDataGrid-row');
+      const count = await rows.count();
+      log.info(`Found ${count} rows`);
+      if (count > 1) {
+        log.info('✅ Clicking row at index 1 (skipping header)');
+        await rows.nth(1).click();
+        return true;
+      }
+      return false;
+    },
+    // Strategy 3: Click first link
+    async () => {
+      const links = page.locator('a').filter({ hasText: new RegExp(safeFrag, 'i') });
+      const count = await links.count();
+      log.info(`Found ${count} matching links`);
+      if (count > 0) {
+        log.info('✅ Clicking first matching link');
+        await links.first().click();
+        return true;
+      }
+      return false;
+    },
+    // Strategy 4: Click any link in results area
+    async () => {
+      const links = page.locator('a');
+      const count = await links.count();
+      log.info(`Found ${count} total links`);
+      if (count > 0) {
+        log.info('✅ Clicking first link');
+        await links.first().click();
+        return true;
+      }
+      return false;
+    }
+  ];
+
+  for (let i = 0; i < strategies.length; i++) {
+    try {
+      log.info(`🔍 Trying result click strategy ${i + 1}...`);
+      const success = await strategies[i]();
+      if (success) {
+        log.info(`✅ Successfully clicked result using strategy ${i + 1}`);
+        await page.waitForLoadState('networkidle', { timeout: 60_000 });
+        await sleep(jitter(politeDelayMs));
+        if (debug) await snapshot(page, `detail-after-opening-${streetFrag}`);
+        return;
+      }
+    } catch (e) {
+      log.info(`  Strategy ${i + 1} failed: ${e.message}`);
+    }
+  }
+
+  throw new Error('No clickable search results found after trying all strategies.');
 }
 
 // --- Downloader: handles download event, popup, or inline PDF ---
