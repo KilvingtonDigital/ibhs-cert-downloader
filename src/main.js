@@ -151,22 +151,6 @@ async function snapshot(page, label) {
   }
 }
 
-async function openSearch(page) {
-  const byPlaceholder = page
-    .locator('input[type="search"], [placeholder*="search" i], [aria-label*="search" i]')
-    .first();
-  if (await byPlaceholder.count()) return byPlaceholder;
-
-  const searchBtn = page.getByText(/^\s*search\s*$/i).first();
-  if (await searchBtn.count()) {
-    await searchBtn.click();
-    return page.getByPlaceholder('Search');
-  }
-
-  await page.keyboard.press('/');
-  return page.getByPlaceholder('Search');
-}
-
 async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayMs, debug }) {
   const emailSel  = 'input[type="email"], input[name="email"], input[autocomplete="username"]';
   const passSel   = 'input[type="password"], input[name="password"], input[autocomplete="current-password"]';
@@ -230,229 +214,10 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
   await sleep(jitter(politeDelayMs));
 }
 
-async function openFirstResult(page, addr, { politeDelayMs, debug }) {
-  const streetFrag = addr.split(',')[0].trim();
-  const safeFrag = streetFrag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+async function run() {
+  await Actor.init();
 
-  log.info('⏳ Waiting for search results to load...');
-  await page.waitForTimeout(2000);
-  
-  const strategies = [
-    async () => {
-      const exact = page.getByText(new RegExp(`^\\s*${safeFrag}\\b`, 'i')).first();
-      if (await exact.count()) {
-        log.info(`✅ Found exact match: ${safeFrag}`);
-        await exact.click();
-        return true;
-      }
-      return false;
-    },
-    async () => {
-      const rows = page.locator('[role="row"], tr, .MuiDataGrid-row');
-      const count = await rows.count();
-      log.info(`Found ${count} rows`);
-      if (count > 1) {
-        log.info('✅ Clicking row at index 1 (skipping header)');
-        await rows.nth(1).click();
-        return true;
-      }
-      return false;
-    },
-    async () => {
-      const links = page.locator('a').filter({ hasText: new RegExp(safeFrag, 'i') });
-      const count = await links.count();
-      log.info(`Found ${count} matching links`);
-      if (count > 0) {
-        log.info('✅ Clicking first matching link');
-        await links.first().click();
-        return true;
-      }
-      return false;
-    },
-    async () => {
-      const links = page.locator('a');
-      const count = await links.count();
-      log.info(`Found ${count} total links`);
-      if (count > 0) {
-        log.info('✅ Clicking first link');
-        await links.first().click();
-        return true;
-      }
-      return false;
-    }
-  ];
-
-  for (let i = 0; i < strategies.length; i++) {
-    try {
-      log.info(`🔍 Trying result click strategy ${i + 1}...`);
-      const success = await strategies[i]();
-      if (success) {
-        log.info(`✅ Successfully clicked result using strategy ${i + 1}`);
-        await page.waitForLoadState('networkidle', { timeout: 60_000 });
-        await sleep(jitter(politeDelayMs));
-        if (debug) await snapshot(page, `detail-after-opening-${streetFrag}`);
-        return;
-      }
-try {
-        log.info(`📝 Filling search field with: ${addr}`);
-        await searchField.click();
-        await page.waitForTimeout(500);
-        await searchField.fill(addr);
-        await sleep(jitter(500));
-        
-        log.info(`⌨️ Pressing Enter to search...`);
-        await page.keyboard.press('Enter');
-        
-        await page.waitForLoadState('networkidle', { timeout: 60_000 });
-        await sleep(jitter(politeDelayMs));
-        
-        await debugPageState(page, 'AFTER_SEARCH');
-        
-      } catch (searchError) {
-        log.error(`❌ Search failed: ${searchError.message}`);
-        await debugPageState(page, 'SEARCH_ERROR');
-        
-        if (returnStructuredData) {
-          await Actor.pushData({
-            address: addr,
-            searchAddress: key,
-            status: 'search_failed',
-            error: `Search failed: ${searchError.message}`,
-            processedAt: new Date().toISOString()
-          });
-        }
-        
-        processed[key] = { status: 'search_failed', error: searchError.message };
-        await saveProcessed(processed);
-        handled++;
-        continue;
-      }
-
-      // NEW CODE STARTS HERE - Look for Download button directly in search results
-      log.info('⏳ Waiting for search results to load...');
-      await page.waitForTimeout(2000);
-
-      // Check if there's a Download button in the results table
-      const downloadButton = page.getByText(/^\s*Download\s*$/i).first();
-      const hasDownload = await downloadButton.count();
-
-      if (!hasDownload) {
-        log.warning('No Download button found in search results');
-        
-        if (returnStructuredData) {
-          await Actor.pushData({
-            address: addr,
-            searchAddress: key,
-            status: 'no_certificate',
-            error: 'No download button found in search results',
-            processedAt: new Date().toISOString()
-          });
-        }
-        
-        processed[key] = { status: 'no_certificate' };
-        await saveProcessed(processed);
-        handled++;
-        continue;
-      }
-
-      log.info('✅ Found Download button in search results');
-
-      // Download the certificate directly from the results table
-      const buffer = await downloadCertificate({ page, context, key, debug });
-
-      // Try to get expiration date from the table row
-      let expires = '';
-      try {
-        const expiresCell = page.locator('text=/expires/i').first();
-        if (await expiresCell.count()) {
-          const cellText = await expiresCell.textContent();
-          expires = cellText?.trim() || '';
-        }
-      } catch {}
-
-      const basePretty = `${key}${expires ? ` - Expires ${expires}` : ''}`.replace(/\s+/g, ' ');
-      const prettyName = sanitizeFileName(`${basePretty}.pdf`);
-      const kvName = kvSafeKey(`${key}-certificate.pdf`);
-
-      if (!buffer || buffer.length === 0) {
-        log.warning(`PDF buffer empty for ${key}; not saving.`);
-      } else {
-        await Actor.setValue(kvName, buffer, { contentType: 'application/pdf' });
-        log.info(`Saved to KVS: ${kvName} (${buffer.length} bytes)`);
-      }
-
-      try {
-        const repoDownloads = path.join(process.cwd(), 'downloads');
-        await fs.mkdir(repoDownloads, { recursive: true });
-        if (buffer && buffer.length > 0) {
-          await fs.writeFile(path.join(repoDownloads, prettyName), buffer);
-          log.info(`Saved (repo): ${path.join(repoDownloads, prettyName)}`);
-        }
-      } catch (e) {
-        log.warning(`Could not save to ./downloads: ${e.message}`);
-      }
-
-      try {
-        const userDownloads = path.join(process.env.USERPROFILE || '', 'Downloads');
-        if (userDownloads && buffer && buffer.length > 0) {
-          await fs.mkdir(userDownloads, { recursive: true });
-          await fs.writeFile(path.join(userDownloads, prettyName), buffer);
-          log.info(`Saved (Windows Downloads): ${path.join(userDownloads, prettyName)}`);
-        }
-      } catch (e) {
-        // Cloud won't have USERPROFILE
-      }
-
-      let driveFileId = null;
-      let driveWebViewLink = null;
-      try {
-        if (buffer && buffer.length > 0) {
-          const uploaded = await uploadToGoogleDrive(buffer, prettyName);
-          if (uploaded?.id) {
-            driveFileId = uploaded.id;
-            driveWebViewLink = uploaded.webViewLink;
-            log.info(`Uploaded to Google Drive: ${uploaded.webViewLink || uploaded.id}`);
-          } else {
-            log.warning('Google Drive upload skipped or failed (no file id returned).');
-          }
-        } else {
-          log.warning('Skipping Drive upload (empty buffer).');
-        }
-      } catch (e) {
-        log.warning(`Google Drive upload error: ${e.message}`);
-      }
-
-      const downloadStatus = buffer && buffer.length > 0 ? 'downloaded' : 'empty_pdf';
-      
-      if (returnStructuredData) {
-        await Actor.pushData({
-          address: addr,
-          searchAddress: key,
-          status: downloadStatus,
-          certificateFile: kvName,
-          fileName: prettyName,
-          fileSize: buffer ? buffer.length : 0,
-          expires: expires || null,
-          googleDriveFileId: driveFileId,
-          googleDriveLink: driveWebViewLink,
-          downloadedAt: new Date().toISOString(),
-          processedAt: new Date().toISOString()
-        });
-      }
-
-      processed[key] = { 
-        status: downloadStatus, 
-        file: kvName, 
-        when: new Date().toISOString(),
-        fileSize: buffer ? buffer.length : 0,
-        expires: expires || null
-      };
-      await saveProcessed(processed);
-
-      await page.waitForTimeout(1000);
-      // No need to go back - we're already on the results page
-
-      handled++;
+  const input = (await Actor.getInput()) || {};
   const {
     loginUrl = 'https://app.ibhs.org/fh',
     addresses: rawAddresses = [],
@@ -633,44 +398,22 @@ try {
         continue;
       }
 
-      try {
-        await openFirstResult(page, addr, { politeDelayMs, debug });
-      } catch {
-        if (returnStructuredData) {
-          await Actor.pushData({
-            address: addr,
-            searchAddress: key,
-            status: 'no_results',
-            error: 'No search results found for address',
-            processedAt: new Date().toISOString()
-          });
-        }
+      // Look for Download button directly in search results
+      log.info('⏳ Waiting for search results to load...');
+      await page.waitForTimeout(2000);
+
+      const downloadButton = page.getByText(/^\s*Download\s*$/i).first();
+      const hasDownload = await downloadButton.count();
+
+      if (!hasDownload) {
+        log.warning('No Download button found in search results');
         
-        processed[key] = { status: 'no_results' };
-        await saveProcessed(processed);
-        handled++;
-        continue;
-      }
-
-      let certControl = page.getByText(/^\s*Certificates?\s*$/i).first();
-      if (!(await certControl.count())) {
-        certControl = page.locator('[role="tab"], [role="link"], button, a')
-          .filter({ hasText: /Certificates?/i })
-          .first();
-      }
-
-      if (await certControl.count()) {
-        await certControl.click();
-        await page.waitForLoadState('networkidle', { timeout: 60_000 });
-        await sleep(jitter(300));
-        if (debug) await snapshot(page, `detail-after-certificate-${key}`);
-      } else {
         if (returnStructuredData) {
           await Actor.pushData({
             address: addr,
             searchAddress: key,
             status: 'no_certificate',
-            error: 'No certificate section found on property page',
+            error: 'No download button found in search results',
             processedAt: new Date().toISOString()
           });
         }
@@ -678,42 +421,71 @@ try {
         processed[key] = { status: 'no_certificate' };
         await saveProcessed(processed);
         handled++;
-        await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
         continue;
       }
 
-      let hasDownload = await page.getByText(/^\s*Download\s*$/i).first().count();
-      if (!hasDownload) {
-        const downloadLike = page.locator('button, [role="button"], a').filter({ hasText: /download/i }).first();
-        if (await downloadLike.count()) hasDownload = 1;
-      }
-      if (!hasDownload) {
-        if (returnStructuredData) {
-          await Actor.pushData({
-            address: addr,
-            searchAddress: key,
-            status: 'no_download',
-            error: 'No download button found for certificate',
-            processedAt: new Date().toISOString()
-          });
+      log.info('✅ Found Download button in search results');
+
+      // Download the certificate
+      if (debug) await snapshot(page, `pre-download-${key}`);
+
+      const downloadPromise = page.waitForEvent('download', { timeout: 120_000 }).then(d => ({ kind: 'download', d })).catch(() => null);
+      const popupPromise = page.waitForEvent('popup', { timeout: 120_000 }).then(p => ({ kind: 'popup', p })).catch(() => null);
+      const responsePromise = page.waitForResponse(
+        resp => (resp.headers()['content-type'] || '').toLowerCase().includes('application/pdf'),
+        { timeout: 120_000 }
+      ).then(r => ({ kind: 'response', r })).catch(() => null);
+
+      await downloadButton.click({ delay: jitter(80, 160) });
+
+      let signal = await Promise.race([downloadPromise, popupPromise, responsePromise]);
+      if (!signal) {
+        for (let waited = 0; waited < 25000 && !signal; waited += 500) {
+          await page.waitForTimeout(500);
+          signal = await Promise.race([downloadPromise, popupPromise, responsePromise]);
         }
-        
-        processed[key] = { status: 'no_download' };
-        await saveProcessed(processed);
-        handled++;
-        await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
-        await page.waitForLoadState('networkidle', { timeout: 60_000 });
-        continue;
       }
 
-      const buffer = await downloadCertificate({ page, context, key, debug });
+      let buffer = null;
 
+      if (signal?.kind === 'download') {
+        const dl = signal.d;
+        log.info('Download event detected; reading file…');
+        try {
+          const stream = await dl.createReadStream();
+          if (stream) buffer = await streamToBuffer(stream);
+          else {
+            const filePath = await dl.path();
+            buffer = await fs.readFile(filePath);
+          }
+        } catch (e) {
+          log.warning(`Stream read failed: ${e.message}`);
+        }
+      } else if (signal?.kind === 'response') {
+        log.info('Inline PDF response detected; capturing body…');
+        buffer = await signal.r.body();
+      } else if (signal?.kind === 'popup') {
+        log.info('Popup detected; trying to capture PDF from popup…');
+        const p = signal.p;
+        await p.waitForLoadState('domcontentloaded', { timeout: 60_000 }).catch(() => {});
+        
+        const pdfResp = await p.waitForResponse(
+          resp => (resp.headers()['content-type'] || '').toLowerCase().includes('application/pdf'),
+          { timeout: 60_000 }
+        ).catch(() => null);
+
+        if (pdfResp) {
+          buffer = await pdfResp.body();
+        }
+      }
+
+      // Try to get expiration date from the table row
       let expires = '';
       try {
-        const expLabel = page.getByText(/expires/i).first();
-        if (await expLabel.count()) {
-          const near = await expLabel.evaluateHandle((el) => el.nextElementSibling?.textContent || '');
-          expires = (await near.jsonValue())?.toString().trim() || '';
+        const expiresCell = page.locator('text=/expires/i').first();
+        if (await expiresCell.count()) {
+          const cellText = await expiresCell.textContent();
+          expires = cellText?.trim() || '';
         }
       } catch {}
 
@@ -738,6 +510,7 @@ try {
       } catch (e) {
         log.warning(`Could not save to ./downloads: ${e.message}`);
       }
+
       try {
         const userDownloads = path.join(process.env.USERPROFILE || '', 'Downloads');
         if (userDownloads && buffer && buffer.length > 0) {
@@ -796,11 +569,6 @@ try {
       await saveProcessed(processed);
 
       await page.waitForTimeout(1000);
-
-      await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
-      await page.waitForLoadState('networkidle', { timeout: 60_000 });
-      if (debug) await snapshot(page, `back-to-results-${key}`);
-      await sleep(jitter(politeDelayMs));
 
       handled++;
     }
