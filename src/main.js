@@ -15,17 +15,14 @@ async function debugPageState(page, step) {
   log.info(`🔍 === DEBUG ${step} at ${timestamp} ===`);
   
   try {
-    // Basic page info
     const url = page.url();
     const title = await page.title();
     log.info(`📍 URL: ${url}`);
     log.info(`📄 Title: ${title}`);
     
-    // Check for login indicators (to see if we're still on login page)
     const loginElements = await page.locator('input[type="email"], input[type="password"], [text*="sign in" i], [text*="log in" i]').count();
     log.info(`🔐 Login elements found: ${loginElements}`);
     
-    // Check for search-related elements
     const searchElements = await Promise.all([
       page.locator('input[type="search"]').count(),
       page.locator('[placeholder*="search" i]').count(),
@@ -37,7 +34,6 @@ async function debugPageState(page, step) {
     log.info(`🔍 Search elements - type=search: ${searchElements[0]}, placeholder: ${searchElements[1]}, aria-label: ${searchElements[2]}`);
     log.info(`📝 Total inputs: ${searchElements[3]}, Total buttons: ${searchElements[4]}`);
     
-    // Get all input elements with their attributes
     const inputs = await page.locator('input').all();
     for (let i = 0; i < Math.min(inputs.length, 5); i++) {
       const input = inputs[i];
@@ -55,13 +51,11 @@ async function debugPageState(page, step) {
       }
     }
     
-    // Take screenshot
     const png = await page.screenshot({ fullPage: true });
     const screenshotKey = `debug-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
     await Actor.setValue(screenshotKey, png, { contentType: 'image/png' });
     log.info(`📸 Screenshot saved as: ${screenshotKey}`);
     
-    // Save HTML
     const html = await page.content();
     const htmlKey = `debug-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.html`;
     await Actor.setValue(htmlKey, html, { contentType: 'text/html' });
@@ -74,7 +68,6 @@ async function debugPageState(page, step) {
   log.info(`🔍 === END DEBUG ${step} ===`);
 }
 
-// Normalize addresses
 const normalizeAddress = (s = '') =>
   s
     .toLowerCase()
@@ -87,11 +80,10 @@ function sanitizeFileName(name) {
   return name.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 180);
 }
 
-// Apify KVS keys must be a-zA-Z0-9!-_.'() and <= 256 chars
 function kvSafeKey(name) {
   return (name || '')
-    .replace(/[^a-zA-Z0-9!\-_\.'()]+/g, '-') // replace anything illegal with '-'
-    .slice(0, 250); // keep room for .pdf
+    .replace(/[^a-zA-Z0-9!\-_\.'()]+/g, '-')
+    .slice(0, 250);
 }
 
 async function streamToBuffer(stream) {
@@ -110,7 +102,6 @@ async function saveProcessed(map) {
   await store.setValue('processed_by_address', map);
 }
 
-// --- Google Drive upload via Service Account ---
 async function uploadToGoogleDrive(buffer, fileName, mimeType = 'application/pdf') {
   const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
   const clientEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
@@ -121,7 +112,6 @@ async function uploadToGoogleDrive(buffer, fileName, mimeType = 'application/pdf
     return null;
   }
 
-  // Apify secrets store newlines as \n — unescape them.
   privateKey = privateKey.replace(/\\n/g, '\n');
 
   const jwt = new google.auth.JWT({
@@ -139,14 +129,13 @@ async function uploadToGoogleDrive(buffer, fileName, mimeType = 'application/pdf
     media,
     fields: 'id, webViewLink',
   });
-  return res.data; // { id, webViewLink }
+  return res.data;
 }
 
-// --- Snapshot helpers (short, safe keys for Apify KV) ---
 function safeKey(prefix, label, ext) {
   const clean = (label || '')
     .toLowerCase()
-    .replace(/[^a-z0-9!._'()\-]+/g, '-') // allowed chars only
+    .replace(/[^a-z0-9!._'()\-]+/g, '-')
     .slice(0, 80);
   return `${prefix}-${Date.now()}-${clean}.${ext}`;
 }
@@ -162,7 +151,6 @@ async function snapshot(page, label) {
   }
 }
 
-// --- Search box finder (avoids login fields) ---
 async function openSearch(page) {
   const byPlaceholder = page
     .locator('input[type="search"], [placeholder*="search" i], [aria-label*="search" i]')
@@ -175,12 +163,10 @@ async function openSearch(page) {
     return page.getByPlaceholder('Search');
   }
 
-  // Common shortcut in React shells
   await page.keyboard.press('/');
   return page.getByPlaceholder('Search');
 }
 
-// --- Robust login ---
 async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayMs, debug }) {
   const emailSel  = 'input[type="email"], input[name="email"], input[autocomplete="username"]';
   const passSel   = 'input[type="password"], input[name="password"], input[autocomplete="current-password"]';
@@ -244,61 +230,14 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
   await sleep(jitter(politeDelayMs));
 }
 
-// --- Open first matching result after a search ---
-async function openFirstResult(page, addr, { politeDelayMs, debug }) {
-  const streetFrag = addr.split(',')[0].trim();
-  const safeFrag = streetFrag.replace(/[.*+?^${}()|[\]\\]/g, '\\// --- Open first matching result after a search ---
 async function openFirstResult(page, addr, { politeDelayMs, debug }) {
   const streetFrag = addr.split(',')[0].trim();
   const safeFrag = streetFrag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  const containers = [
-    '[role="grid"]',
-    '[role="table"]',
-    'table',
-    '[data-testid*="result"]',
-    '[data-test*="result"]',
-    '.results, .search-results, .list, .table, .grid'
-  ];
-  for (const sel of containers) {
-    try {
-      const found = await page.locator(sel).first().waitFor({ timeout: 6_000 });
-      if (found) break;
-    } catch {}
-  }
-
-  const rowCandidates = page.locator(
-    '[role="row"], tr, [data-testid*="row"], [data-test*="row"], .row, .list-item, .MuiDataGrid-row'
-  );
-  const rowCount = await rowCandidates.count().catch(() => 0);
-
-  const linkCandidates = page.locator('a');
-  const linkCount = await linkCandidates.count().catch(() => 0);
-
-  log.info(`Result probe: rows=${rowCount} links=${linkCount}`);
-
-  const exact = page.getByText(new RegExp(`^\\s*${safeFrag}\\b`, 'i')).first();
-  if (await exact.count()) {
-    await exact.click();
-  } else if (rowCount > 1) {
-    await rowCandidates.nth(1).click(); // skip header
-  } else if (linkCount > 0) {
-    await linkCandidates.first().click();
-  } else {
-    throw new Error('No clickable search results found.');
-  }
-
-  await page.waitForLoadState('networkidle', { timeout: 60_000 });
-  await sleep(jitter(politeDelayMs));
-  if (debug) await snapshot(page, `detail-after-opening-${streetFrag}`);
-}');
-
   log.info('⏳ Waiting for search results to load...');
-  await page.waitForTimeout(2000); // Give results time to appear
+  await page.waitForTimeout(2000);
   
-  // Try multiple strategies to find and click the first result
   const strategies = [
-    // Strategy 1: Look for the exact address text and click it
     async () => {
       const exact = page.getByText(new RegExp(`^\\s*${safeFrag}\\b`, 'i')).first();
       if (await exact.count()) {
@@ -308,7 +247,6 @@ async function openFirstResult(page, addr, { politeDelayMs, debug }) {
       }
       return false;
     },
-    // Strategy 2: Click the first data row (skip header)
     async () => {
       const rows = page.locator('[role="row"], tr, .MuiDataGrid-row');
       const count = await rows.count();
@@ -320,7 +258,6 @@ async function openFirstResult(page, addr, { politeDelayMs, debug }) {
       }
       return false;
     },
-    // Strategy 3: Click first link
     async () => {
       const links = page.locator('a').filter({ hasText: new RegExp(safeFrag, 'i') });
       const count = await links.count();
@@ -332,7 +269,6 @@ async function openFirstResult(page, addr, { politeDelayMs, debug }) {
       }
       return false;
     },
-    // Strategy 4: Click any link in results area
     async () => {
       const links = page.locator('a');
       const count = await links.count();
@@ -365,13 +301,11 @@ async function openFirstResult(page, addr, { politeDelayMs, debug }) {
   throw new Error('No clickable search results found after trying all strategies.');
 }
 
-// --- Downloader: handles download event, popup, or inline PDF ---
 async function downloadCertificate({ page, context, key, debug }) {
   if (debug) await snapshot(page, `pre-download-${key}`);
 
   const downloadButton = page.getByText(/^\s*Download\s*$/i).first();
 
-  // Prepare possible completion signals *before* clicking
   const downloadPromise = page.waitForEvent('download', { timeout: 120_000 }).then(d => ({ kind: 'download', d })).catch(() => null);
   const popupPromise    = page.waitForEvent('popup',    { timeout: 120_000 }).then(p => ({ kind: 'popup', p })).catch(() => null);
   const responsePromise = page.waitForResponse(
@@ -381,7 +315,6 @@ async function downloadCertificate({ page, context, key, debug }) {
 
   await downloadButton.click({ delay: jitter(80, 160) });
 
-  // Wait for whichever signal fires first (and poll up to 25s if needed)
   let signal = await Promise.race([downloadPromise, popupPromise, responsePromise]);
   if (!signal) {
     for (let waited = 0; waited < 25000 && !signal; waited += 500) {
@@ -435,7 +368,6 @@ async function downloadCertificate({ page, context, key, debug }) {
     log.warning('No download/popup/response signal detected. Waiting an extra 25s just in case…');
   }
 
-  // Belt-and-suspenders delay to avoid cutting off I/O
   await page.waitForTimeout(25000);
 
   return buffer || Buffer.alloc(0);
@@ -448,7 +380,7 @@ async function run() {
   const {
     loginUrl = 'https://app.ibhs.org/fh',
     addresses: rawAddresses = [],
-    address, // NEW: Single address from n8n
+    address,
     maxAddressesPerRun = 1,
     politeDelayMs = 800,
     debug = false,
@@ -459,7 +391,6 @@ async function run() {
 
   let addresses = [];
   
-  // NEW: Handle single address (for n8n integration)
   if (address && typeof address === 'string') {
     addresses = [address.trim()];
   } else if (Array.isArray(rawAddresses)) {
@@ -521,17 +452,14 @@ async function run() {
 
       log.info(`🎯 Processing address: ${addr}`);
 
-      // SEARCH (WITH DEBUG)
       await debugPageState(page, 'BEFORE_SEARCH');
 
       log.info(`🔍 Searching for: ${addr}`);
 
-      // WAIT for the page to be fully interactive first
       log.info('⏳ Waiting for page to be fully loaded...');
-      await page.waitForTimeout(3000); // Give the React app time to initialize
+      await page.waitForTimeout(3000);
       await page.waitForLoadState('networkidle');
 
-      // Try to find search field - FIXED VERSION
       let searchField = null;
       const strategies = [
         () => page.getByPlaceholder('Search'),
@@ -547,7 +475,6 @@ async function run() {
           log.info(`🔍 Trying search strategy ${i + 1}...`);
           const element = strategies[i]();
           
-          // Wait a bit for the element to appear
           await element.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
           
           const count = await element.count();
@@ -574,12 +501,10 @@ async function run() {
         await page.reload({ waitUntil: 'networkidle' });
         await sleep(jitter(politeDelayMs));
         
-        // Try one more time after reload - use the specific search field
         searchField = page.getByPlaceholder('Search');
         if (!(await searchField.count())) {
           await debugPageState(page, 'STILL_NO_SEARCH_FIELD');
           
-          // DATASET OUTPUT: Record failure
           if (returnStructuredData) {
             await Actor.pushData({
               address: addr,
@@ -597,7 +522,6 @@ async function run() {
         }
       }
 
-      // Actually perform the search
       try {
         log.info(`📝 Filling search field with: ${addr}`);
         await searchField.click();
@@ -617,7 +541,6 @@ async function run() {
         log.error(`❌ Search failed: ${searchError.message}`);
         await debugPageState(page, 'SEARCH_ERROR');
         
-        // DATASET OUTPUT: Record search failure
         if (returnStructuredData) {
           await Actor.pushData({
             address: addr,
@@ -634,11 +557,9 @@ async function run() {
         continue;
       }
 
-      // OPEN FIRST RESULT
       try {
         await openFirstResult(page, addr, { politeDelayMs, debug });
       } catch {
-        // DATASET OUTPUT: Record no results
         if (returnStructuredData) {
           await Actor.pushData({
             address: addr,
@@ -655,7 +576,6 @@ async function run() {
         continue;
       }
 
-      // Go to Certificate(s) section
       let certControl = page.getByText(/^\s*Certificates?\s*$/i).first();
       if (!(await certControl.count())) {
         certControl = page.locator('[role="tab"], [role="link"], button, a')
@@ -669,7 +589,6 @@ async function run() {
         await sleep(jitter(300));
         if (debug) await snapshot(page, `detail-after-certificate-${key}`);
       } else {
-        // DATASET OUTPUT: Record no certificate section
         if (returnStructuredData) {
           await Actor.pushData({
             address: addr,
@@ -687,14 +606,12 @@ async function run() {
         continue;
       }
 
-      // Find a Download control
       let hasDownload = await page.getByText(/^\s*Download\s*$/i).first().count();
       if (!hasDownload) {
         const downloadLike = page.locator('button, [role="button"], a').filter({ hasText: /download/i }).first();
         if (await downloadLike.count()) hasDownload = 1;
       }
       if (!hasDownload) {
-        // DATASET OUTPUT: Record no download button
         if (returnStructuredData) {
           await Actor.pushData({
             address: addr,
@@ -713,10 +630,8 @@ async function run() {
         continue;
       }
 
-      // DOWNLOAD (handles event, popup, or inline)
       const buffer = await downloadCertificate({ page, context, key, debug });
 
-      // Optional "Expires" scrape
       let expires = '';
       try {
         const expLabel = page.getByText(/expires/i).first();
@@ -726,12 +641,10 @@ async function run() {
         }
       } catch {}
 
-      // Build names
       const basePretty = `${key}${expires ? ` - Expires ${expires}` : ''}`.replace(/\s+/g, ' ');
       const prettyName = sanitizeFileName(`${basePretty}.pdf`);
       const kvName = kvSafeKey(`${key}-certificate.pdf`);
 
-      // Save to Apify KV (canonical)
       if (!buffer || buffer.length === 0) {
         log.warning(`PDF buffer empty for ${key}; not saving.`);
       } else {
@@ -739,7 +652,6 @@ async function run() {
         log.info(`Saved to KVS: ${kvName} (${buffer.length} bytes)`);
       }
 
-      // Also mirror to ./downloads (local dev) and to Windows Downloads when present
       try {
         const repoDownloads = path.join(process.cwd(), 'downloads');
         await fs.mkdir(repoDownloads, { recursive: true });
@@ -758,10 +670,9 @@ async function run() {
           log.info(`Saved (Windows Downloads): ${path.join(userDownloads, prettyName)}`);
         }
       } catch (e) {
-        // Cloud environment won't have USERPROFILE; that's fine.
+        // Cloud won't have USERPROFILE
       }
 
-      // Upload to Google Drive folder (Cloud-native target)
       let driveFileId = null;
       let driveWebViewLink = null;
       try {
@@ -783,7 +694,6 @@ async function run() {
 
       const downloadStatus = buffer && buffer.length > 0 ? 'downloaded' : 'empty_pdf';
       
-      // DATASET OUTPUT: Record successful download
       if (returnStructuredData) {
         await Actor.pushData({
           address: addr,
@@ -809,10 +719,8 @@ async function run() {
       };
       await saveProcessed(processed);
 
-      // Brief pause
       await page.waitForTimeout(1000);
 
-      // Back to results for next address
       await page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
       await page.waitForLoadState('networkidle', { timeout: 60_000 });
       if (debug) await snapshot(page, `back-to-results-${key}`);
