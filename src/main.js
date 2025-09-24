@@ -187,8 +187,22 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
   const submitSel = 'button:has-text("Sign in"), button:has-text("Log in"), button[type="submit"], [type="submit"]';
 
   log.info('🔑 Starting login process...');
-  await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-  await page.waitForLoadState('networkidle', { timeout: 60_000 });
+  log.info(`📍 Navigating to: ${loginUrl}`);
+  
+  try {
+    await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
+    log.info('✅ Page loaded (domcontentloaded)');
+  } catch (e) {
+    log.error(`❌ Failed to load page: ${e.message}`);
+    throw e;
+  }
+  
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 60_000 });
+    log.info('✅ Network idle reached');
+  } catch (e) {
+    log.warning(`⚠️ Network idle timeout: ${e.message} - continuing anyway`);
+  }
   
   if (debug) await debugPageState(page, 'LOGIN_PAGE_LOADED');
 
@@ -382,11 +396,22 @@ async function run() {
   const username = usernameFromInput || process.env.IBHS_USERNAME;
   const password = passwordFromInput || process.env.IBHS_PASSWORD;
 
-  if (!username || !password) throw new Error('Missing credentials.');
-  if (!addresses.length) throw new Error('No addresses provided.');
+  log.info(`🔐 Credentials check - Username: ${username ? 'SET' : 'MISSING'}, Password: ${password ? 'SET' : 'MISSING'}`);
+  
+  if (!username || !password) {
+    log.error('❌ Missing credentials! Set IBHS_USERNAME and IBHS_PASSWORD in Actor secrets or input.');
+    throw new Error('Missing credentials.');
+  }
+  if (!addresses.length) {
+    log.error('❌ No addresses provided!');
+    throw new Error('No addresses provided.');
+  }
+
+  log.info(`📋 Will process ${addresses.length} address(es): ${addresses.join(', ')}`);
 
   const processed = await loadProcessed();
 
+  log.info('🌐 Launching browser...');
   const browser = await chromium.launch({
     headless: !debug,
     slowMo: debug ? 250 : 0,
@@ -400,9 +425,12 @@ async function run() {
   });
 
   const page = await context.newPage();
+  log.info('✅ Browser launched successfully');
 
   try {
+    log.info('🔓 Attempting login...');
     await ensureLoggedIn(page, { loginUrl, username, password, politeDelayMs, debug });
+    log.info('✅ Login completed successfully!');
 
     let handled = 0;
     for (const raw of addresses) {
