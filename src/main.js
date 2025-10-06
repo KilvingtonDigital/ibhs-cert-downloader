@@ -18,7 +18,7 @@ const normalizeAddress = (s = '') =>
     .trim();
 
 function sanitizeFileName(name) {
-  return name.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 180);
+  return name.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 180);
 }
 
 function kvSafeKey(name) {
