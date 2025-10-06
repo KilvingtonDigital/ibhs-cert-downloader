@@ -68,6 +68,55 @@ async function debugPageState(page, step) {
   log.info(`🔍 === END DEBUG ${step} ===`);
 }
 
+/**
+ * Enhanced debug function to capture modal state
+ */
+async function debugModalState(page, step) {
+  const timestamp = new Date().toISOString();
+  log.info(`🔍 === DEBUG MODAL ${step} at ${timestamp} ===`);
+  
+  try {
+    const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
+    const modalExists = await modalContainer.count() > 0;
+    
+    log.info(`📦 Modal container exists: ${modalExists}`);
+    
+    if (modalExists) {
+      const isVisible = await modalContainer.isVisible();
+      log.info(`👁️ Modal visible: ${isVisible}`);
+      
+      if (isVisible) {
+        const modalText = await modalContainer.textContent();
+        log.info(`📝 Modal text length: ${modalText.length} characters`);
+        log.info(`📝 Modal text preview: ${modalText.substring(0, 300)}...`);
+        
+        // Save modal-specific screenshot
+        const modalPng = await modalContainer.screenshot();
+        const modalScreenshotKey = `debug-modal-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
+        await Actor.setValue(modalScreenshotKey, modalPng, { contentType: 'image/png' });
+        log.info(`📸 Modal screenshot saved as: ${modalScreenshotKey}`);
+        
+        // Save modal HTML
+        const modalHtml = await modalContainer.innerHTML();
+        const modalHtmlKey = `debug-modal-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.html`;
+        await Actor.setValue(modalHtmlKey, modalHtml, { contentType: 'text/html' });
+        log.info(`💾 Modal HTML saved as: ${modalHtmlKey}`);
+      }
+    }
+    
+    // Also capture full page for context
+    const png = await page.screenshot({ fullPage: true });
+    const screenshotKey = `debug-full-${step.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
+    await Actor.setValue(screenshotKey, png, { contentType: 'image/png' });
+    log.info(`📸 Full screenshot saved as: ${screenshotKey}`);
+    
+  } catch (e) {
+    log.error(`❌ Modal debug failed: ${e.message}`);
+  }
+  
+  log.info(`🔍 === END DEBUG MODAL ${step} ===`);
+}
+
 const normalizeAddress = (s = '') =>
   s
     .toLowerCase()
@@ -215,18 +264,29 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
 }
 
 /**
- * Extract FH/FEH number from the page
+ * Extract FH/FEH number from the modal container
  */
 async function extractFHNumber(page) {
   try {
-    // Look for FH or FEH followed by numbers (like FH25019884 or FEH365550202)
+    // Wait for the modal to be visible
+    await page.waitForSelector('[class*="create-home-evaluation-info-container"]', { timeout: 10000 });
+    
+    // Target the modal container specifically
+    const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
+    
+    if (await modalContainer.count() === 0) {
+      log.warning('Modal container not found for FH number extraction');
+      return null;
+    }
+    
+    // Look for FH or FEH followed by numbers within the modal
     const patterns = [
-      // Look in the page text
-      page.locator('text=/FE?H\\d+/i').first(),
-      // Look in FORTIFIED ID column/field
-      page.locator('[class*="fortified"], [id*="fortified"], text=/FORTIFIED ID/i').locator('..').locator('text=/FE?H\\d+/i').first(),
-      // Look in any table cells
-      page.locator('td, div, span').filter({ hasText: /FE?H\d+/i }).first(),
+      // Look in the modal text content
+      modalContainer.locator('text=/FE?H\\d+/i').first(),
+      // Look in any table cells within the modal
+      modalContainer.locator('td, div, span').filter({ hasText: /FE?H\d+/i }).first(),
+      // Look for FORTIFIED ID within the modal
+      modalContainer.locator('[class*="fortified"], [id*="fortified"], text=/FORTIFIED ID/i').locator('..').locator('text=/FE?H\\d+/i').first(),
     ];
 
     for (const pattern of patterns) {
@@ -234,7 +294,7 @@ async function extractFHNumber(page) {
         const text = await pattern.textContent();
         const match = text?.match(/FE?H\d+/i);
         if (match) {
-          log.info(`Found FH/FEH number: ${match[0]}`);
+          log.info(`Found FH/FEH number in modal: ${match[0]}`);
           return match[0].toUpperCase();
         }
       }
@@ -248,7 +308,7 @@ async function extractFHNumber(page) {
       return urlMatch[0].toUpperCase();
     }
 
-    log.warning('No FH/FEH number found');
+    log.warning('No FH/FEH number found in modal');
     return null;
   } catch (e) {
     log.warning(`Error extracting FH/FEH number: ${e.message}`);
@@ -257,7 +317,7 @@ async function extractFHNumber(page) {
 }
 
 /**
- * Extract certificate dates and building address from the page
+ * Extract certificate dates and building address from the modal container
  */
 async function extractCertificateInfo(page) {
   try {
@@ -270,88 +330,204 @@ async function extractCertificateInfo(page) {
       buildingZip: null
     };
 
+    // Wait for the modal to be visible
+    await page.waitForSelector('[class*="create-home-evaluation-info-container"]', { timeout: 10000 });
     await page.waitForTimeout(1000);
 
-    // APPROACH 1: Try to find elements directly by looking for the labels and their adjacent values
+    // Target the modal container specifically
+    const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
+    
+    if (await modalContainer.count() === 0) {
+      log.warning('Modal container not found for certificate info extraction');
+      return info;
+    }
+
+    log.info('Extracting certificate info from modal container...');
+
+    // APPROACH 1: Try to find elements directly within the modal by looking for labels and values
     try {
-      // Find all text elements
-      const allElements = await page.locator('text=/Approved At|Expiration Date|Building Address|Building City|Building State|Building Zip/i').all();
+      // Find all text elements within the modal
+      const modalElements = await modalContainer.locator('text=/Approved At|Expiration Date|Building Address|Building City|Building State|Building Zip/i').all();
       
-      for (const element of allElements) {
+      for (const element of modalElements) {
         try {
           const text = await element.textContent();
+          
+          // Get the parent container to find the associated value
           const parent = element.locator('..');
           const parentText = await parent.textContent();
           
+          // Also try the next sibling or nearby elements
+          const container = element.locator('../..');
+          const containerText = await container.textContent();
+          
+          const searchText = `${parentText} ${containerText}`;
+          
           if (/Approved At/i.test(text)) {
-            const dateMatch = parentText.match(/(\d{2}\/\d{2}\/\d{4})/);
+            const dateMatch = searchText.match(/(\d{2}\/\d{2}\/\d{4})/);
             if (dateMatch && !info.approvedAt) {
               info.approvedAt = dateMatch[1];
-              log.info(`Found Approved At (DOM): ${dateMatch[1]}`);
+              log.info(`Found Approved At in modal: ${dateMatch[1]}`);
             }
           }
           
           if (/Expiration Date/i.test(text)) {
-            const dateMatch = parentText.match(/(\d{2}\/\d{2}\/\d{4})/);
+            const dateMatch = searchText.match(/(\d{2}\/\d{2}\/\d{4})/);
             if (dateMatch && !info.expirationDate) {
               info.expirationDate = dateMatch[1];
-              log.info(`Found Expiration Date (DOM): ${dateMatch[1]}`);
+              log.info(`Found Expiration Date in modal: ${dateMatch[1]}`);
             }
           }
           
           if (/Building Address/i.test(text) && !/Building Address 2/i.test(text)) {
-            const addressMatch = parentText.match(/Building Address\s+(\d+\s+[\w\s]+?)(?:\s+Building|\s+Mobile|$)/i);
+            // Look for address pattern: number + street name
+            const addressMatch = searchText.match(/(\d+\s+[\w\s]+?)(?:\s+Building|\s+Mobile|\s+AL|\s+\d{5}|$)/i);
             if (addressMatch && !info.buildingAddress) {
               info.buildingAddress = addressMatch[1].trim();
-              log.info(`Found Building Address (DOM): ${addressMatch[1]}`);
+              log.info(`Found Building Address in modal: ${addressMatch[1]}`);
             }
           }
+          
+          if (/Building City/i.test(text)) {
+            const cityMatch = searchText.match(/Building City\s+(\w+)/i);
+            if (cityMatch && !info.buildingCity) {
+              info.buildingCity = cityMatch[1];
+              log.info(`Found Building City in modal: ${cityMatch[1]}`);
+            }
+          }
+          
+          if (/Building State/i.test(text)) {
+            const stateMatch = searchText.match(/Building State\s+([A-Z]{2})/i);
+            if (stateMatch && !info.buildingState) {
+              info.buildingState = stateMatch[1];
+              log.info(`Found Building State in modal: ${stateMatch[1]}`);
+            }
+          }
+          
         } catch (e) {
           // Skip this element
+          log.debug(`Could not process modal element: ${e.message}`);
         }
       }
     } catch (e) {
-      log.debug(`DOM extraction failed: ${e.message}`);
+      log.debug(`Modal DOM extraction failed: ${e.message}`);
     }
 
-    // APPROACH 2: Fallback to text extraction if DOM approach didn't work
+    // APPROACH 2: Fallback to text extraction from the entire modal if DOM approach didn't work
     if (!info.approvedAt || !info.expirationDate || !info.buildingAddress) {
-      const pageText = await page.textContent('body');
-      const normalizedText = pageText.replace(/\s+/g, ' ').trim();
-      
-      if (!info.approvedAt) {
-        const approvedMatch = normalizedText.match(/Approved\s+At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-        if (approvedMatch) {
-          info.approvedAt = approvedMatch[1];
-          log.info(`Found Approved At (text): ${approvedMatch[1]}`);
+      try {
+        const modalText = await modalContainer.textContent();
+        const normalizedText = modalText.replace(/\s+/g, ' ').trim();
+        
+        log.info(`Modal text length: ${modalText.length} characters`);
+        log.info(`Modal text preview: ${normalizedText.substring(0, 200)}...`);
+        
+        if (!info.approvedAt) {
+          const approvedMatch = normalizedText.match(/Approved\s+At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+          if (approvedMatch) {
+            info.approvedAt = approvedMatch[1];
+            log.info(`Found Approved At in modal text: ${approvedMatch[1]}`);
+          }
         }
-      }
-      
-      if (!info.expirationDate) {
-        const expirationMatch = normalizedText.match(/Expiration\s+Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-        if (expirationMatch) {
-          info.expirationDate = expirationMatch[1];
-          log.info(`Found Expiration Date (text): ${expirationMatch[1]}`);
+        
+        if (!info.expirationDate) {
+          const expirationMatch = normalizedText.match(/Expiration\s+Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+          if (expirationMatch) {
+            info.expirationDate = expirationMatch[1];
+            log.info(`Found Expiration Date in modal text: ${expirationMatch[1]}`);
+          }
         }
-      }
-      
-      if (!info.buildingAddress) {
-        const addressMatch = normalizedText.match(/Building\s+Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane)\s*[NSEWnsew]?)/i);
-        if (addressMatch) {
-          info.buildingAddress = addressMatch[1].trim();
-          log.info(`Found Building Address (text): ${addressMatch[1]}`);
+        
+        if (!info.buildingAddress) {
+          // Try different address patterns
+          const addressPatterns = [
+            /Building\s+Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle)\s*[NSEWnsew]?)/i,
+            /(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle)\s*[NSEWnsew]?)\s+Mobile/i,
+            /(\d+\s+[\w\s]+)\s+Mobile\s+AL/i
+          ];
+          
+          for (const pattern of addressPatterns) {
+            const addressMatch = normalizedText.match(pattern);
+            if (addressMatch) {
+              info.buildingAddress = addressMatch[1].trim();
+              log.info(`Found Building Address in modal text: ${addressMatch[1]}`);
+              break;
+            }
+          }
         }
+        
+        if (!info.buildingCity) {
+          const cityMatch = normalizedText.match(/Building\s+City[:\s]+(\w+)/i);
+          if (cityMatch) {
+            info.buildingCity = cityMatch[1];
+            log.info(`Found Building City in modal text: ${cityMatch[1]}`);
+          }
+        }
+        
+        if (!info.buildingState) {
+          const stateMatch = normalizedText.match(/Building\s+State[:\s]+([A-Z]{2})/i);
+          if (stateMatch) {
+            info.buildingState = stateMatch[1];
+            log.info(`Found Building State in modal text: ${stateMatch[1]}`);
+          }
+        }
+        
+      } catch (e) {
+        log.warning(`Modal text extraction failed: ${e.message}`);
       }
     }
 
-    log.info('Certificate Info Summary:');
+    // APPROACH 3: Try to extract from table structure if it exists in the modal
+    if (!info.approvedAt || !info.expirationDate || !info.buildingAddress) {
+      try {
+        const tableRows = await modalContainer.locator('tr, [class*="row"]').all();
+        
+        for (const row of tableRows) {
+          try {
+            const rowText = await row.textContent();
+            
+            if (/Approved\s+At/i.test(rowText)) {
+              const dateMatch = rowText.match(/(\d{2}\/\d{2}\/\d{4})/);
+              if (dateMatch && !info.approvedAt) {
+                info.approvedAt = dateMatch[1];
+                log.info(`Found Approved At in modal table: ${dateMatch[1]}`);
+              }
+            }
+            
+            if (/Expiration\s+Date/i.test(rowText)) {
+              const dateMatch = rowText.match(/(\d{2}\/\d{2}\/\d{4})/);
+              if (dateMatch && !info.expirationDate) {
+                info.expirationDate = dateMatch[1];
+                log.info(`Found Expiration Date in modal table: ${dateMatch[1]}`);
+              }
+            }
+            
+            if (/Building\s+Address/i.test(rowText) && !/Building\s+Address\s+2/i.test(rowText)) {
+              const addressMatch = rowText.match(/(\d+\s+[\w\s]+?)(?:\s+Mobile|\s+AL|\s+\d{5}|$)/i);
+              if (addressMatch && !info.buildingAddress) {
+                info.buildingAddress = addressMatch[1].trim();
+                log.info(`Found Building Address in modal table: ${addressMatch[1]}`);
+              }
+            }
+          } catch (e) {
+            // Skip this row
+          }
+        }
+      } catch (e) {
+        log.debug(`Modal table extraction failed: ${e.message}`);
+      }
+    }
+
+    log.info('Modal Certificate Info Summary:');
     log.info(`   Approved At: ${info.approvedAt || 'NOT FOUND'}`);
     log.info(`   Expiration Date: ${info.expirationDate || 'NOT FOUND'}`);
     log.info(`   Building Address: ${info.buildingAddress || 'NOT FOUND'}`);
+    log.info(`   Building City: ${info.buildingCity || 'NOT FOUND'}`);
+    log.info(`   Building State: ${info.buildingState || 'NOT FOUND'}`);
     
     return info;
   } catch (e) {
-    log.warning(`Error extracting certificate info: ${e.message}`);
+    log.warning(`Error extracting certificate info from modal: ${e.message}`);
     return {
       approvedAt: null,
       expirationDate: null,
@@ -676,44 +852,78 @@ async function run() {
       }
 
       // === Extract Certificate Information ===
-      log.info('📅 Extracting certificate information...');
-      await page.waitForTimeout(2000);
+      log.info('📅 Extracting certificate information from modal...');
       
-      // Verify we have the correct address loaded
-      const pageContent = await page.content();
-      const addressParts = addr.toLowerCase().split(/\s+/);
-      const streetNumber = addressParts[0];
-      
-      // Check if the page contains our street number
-      if (!pageContent.toLowerCase().includes(streetNumber)) {
-        log.warning(`⚠️ Warning: Street number ${streetNumber} not found on results page`);
-        log.warning('This might be the wrong address!');
-        
-        if (debug) await debugPageState(page, 'POSSIBLE_WRONG_ADDRESS');
+      // Wait for the modal to be fully loaded and visible
+      try {
+        await page.waitForSelector('[class*="create-home-evaluation-info-container"]', { timeout: 10000 });
+        log.info('✅ Modal container found');
+      } catch (e) {
+        log.warning(`⚠️ Modal container not found: ${e.message}`);
+        if (debug) await debugPageState(page, 'NO_MODAL_CONTAINER');
       }
       
-      // Extract FH/FEH number
+      await page.waitForTimeout(2000);
+      
+      // Use enhanced debug for modal state
+      if (debug) await debugModalState(page, 'CERTIFICATE_INFO_EXTRACTION');
+      
+      // Verify we have the correct address loaded by checking the modal content
+      try {
+        const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
+        if (await modalContainer.count() > 0) {
+          const modalContent = await modalContainer.textContent();
+          const addressParts = addr.toLowerCase().split(/\s+/);
+          const streetNumber = addressParts[0];
+          
+          // Check if the modal contains our street number
+          if (!modalContent.toLowerCase().includes(streetNumber)) {
+            log.warning(`⚠️ Warning: Street number ${streetNumber} not found in modal content`);
+            log.warning('This might be the wrong address!');
+            
+            if (debug) await debugModalState(page, 'POSSIBLE_WRONG_ADDRESS');
+          } else {
+            log.info(`✅ Street number ${streetNumber} confirmed in modal content`);
+          }
+        }
+      } catch (e) {
+        log.debug(`Could not verify address in modal: ${e.message}`);
+      }
+      
+      // Extract FH/FEH number from modal
       const fhNumber = await extractFHNumber(page);
       log.info(`🔢 FH/FEH Number: ${fhNumber || 'Not found'}`);
       
-      // Extract all certificate information (dates + building address)
+      // Extract all certificate information (dates + building address) from modal
       const certInfo = await extractCertificateInfo(page);
       
       log.info('📋 Certificate Information Summary:');
       log.info(`   FH Number: ${fhNumber || 'NOT FOUND'}`);
       log.info(`   Building Address: ${certInfo.buildingAddress || 'NOT FOUND'}`);
+      log.info(`   Building City: ${certInfo.buildingCity || 'NOT FOUND'}`);
+      log.info(`   Building State: ${certInfo.buildingState || 'NOT FOUND'}`);
       log.info(`   Approved At: ${certInfo.approvedAt || 'NOT FOUND'}`);
       log.info(`   Expiration Date: ${certInfo.expirationDate || 'NOT FOUND'}`);
 
-      // Look for Download button or certificate download option
-      log.info('🔍 Looking for certificate download option...');
+      // Look for Download button or certificate download option within the modal
+      log.info('🔍 Looking for certificate download option in modal...');
       await page.waitForTimeout(1000);
 
-      const downloadButton = page.getByText(/^\s*Download\s*$/i).first();
+      // Try to find download button within the modal first, then fallback to page
+      const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
+      let downloadButton = modalContainer.getByText(/^\s*Download\s*$/i).first();
+      
+      if (!(await downloadButton.count())) {
+        // Fallback to page-level download button
+        downloadButton = page.getByText(/^\s*Download\s*$/i).first();
+      }
+      
       const hasDownload = await downloadButton.count();
 
       if (!hasDownload) {
-        log.warning('No Download button found');
+        log.warning('No Download button found in modal or page');
+        
+        if (debug) await debugModalState(page, 'NO_DOWNLOAD_BUTTON');
         
         if (returnStructuredData) {
           await Actor.pushData({
@@ -752,7 +962,7 @@ async function run() {
       log.info('✅ Found Download button');
 
       // Download the certificate
-      if (debug) await snapshot(page, `pre-download-${key}`);
+      if (debug) await debugModalState(page, 'PRE_DOWNLOAD');
 
       const downloadPromise = page.waitForEvent('download', { timeout: 120_000 }).then(d => ({ kind: 'download', d })).catch(() => null);
       const popupPromise = page.waitForEvent('popup', { timeout: 120_000 }).then(p => ({ kind: 'popup', p })).catch(() => null);
