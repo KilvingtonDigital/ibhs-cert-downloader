@@ -1,0 +1,7 @@
+{
+  "name": "ibhs-cert-downloader",
+  "version": "1.0.0",
+  "buildTag": "latest",
+  "env": null,
+  "template": "playwright_javascript"
+}
