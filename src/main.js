@@ -238,48 +238,48 @@ async function extractFHNumber(page) {
   try {
     log.info('🔢 Extracting FH/FEH number...');
     
-    const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
-    if (await modalContainer.count() > 0) {
-      log.info('Searching for FH number in modal container...');
-      
-      const modalPatterns = [
-        modalContainer.locator('text=/FE?H\\d+/i').first(),
-        modalContainer.locator('td, div, span').filter({ hasText: /FE?H\d+/i }).first(),
-      ];
-
-      for (const pattern of modalPatterns) {
-        if (await pattern.count()) {
-          const text = await pattern.textContent();
-          const match = text?.match(/FE?H\d+/i);
-          if (match) {
-            log.info(`Found FH/FEH number in modal: ${match[0]}`);
-            return match[0].toUpperCase();
-          }
-        }
-      }
-    }
-    
-    const pagePatterns = [
+    // Strategy 1: Look for text in modal or page
+    const textPatterns = [
       page.locator('text=/FE?H\\d+/i').first(),
-      page.locator('td, div, span').filter({ hasText: /FE?H\d+/i }).first(),
+      page.locator('td, div, span, label').filter({ hasText: /FE?H\d+/i }).first(),
     ];
 
-    for (const pattern of pagePatterns) {
+    for (const pattern of textPatterns) {
       if (await pattern.count()) {
         const text = await pattern.textContent();
         const match = text?.match(/FE?H\d+/i);
         if (match) {
-          log.info(`Found FH/FEH number on page: ${match[0]}`);
+          log.info(`Found FH/FEH number: ${match[0]}`);
           return match[0].toUpperCase();
         }
       }
     }
 
+    // Strategy 2: Search input field for "Search by FID"
+    const fidInput = page.locator('input[placeholder*="FID" i], input[value*="FH" i]');
+    if (await fidInput.count()) {
+      const value = await fidInput.inputValue();
+      const match = value?.match(/FE?H\d+/i);
+      if (match) {
+        log.info(`Found FH/FEH number in input: ${match[0]}`);
+        return match[0].toUpperCase();
+      }
+    }
+
+    // Strategy 3: Extract from URL
     const url = page.url();
     const urlMatch = url.match(/FE?H\d+/i);
     if (urlMatch) {
       log.info(`Found FH/FEH number in URL: ${urlMatch[0]}`);
       return urlMatch[0].toUpperCase();
+    }
+
+    // Strategy 4: Full page text search
+    const pageText = await page.textContent('body');
+    const textMatch = pageText?.match(/FE?H\d+/i);
+    if (textMatch) {
+      log.info(`Found FH/FEH number in page text: ${textMatch[0]}`);
+      return textMatch[0].toUpperCase();
     }
 
     log.warning('No FH/FEH number found anywhere on page');
@@ -304,41 +304,110 @@ async function extractCertificateInfo(page) {
     log.info('📋 Extracting certificate info...');
     await page.waitForTimeout(2000);
 
-    const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
-    const modalExists = await modalContainer.count() > 0;
+    // Get all text content from the visible modal/page
+    const pageText = await page.textContent('body');
+    const normalizedText = pageText.replace(/\s+/g, ' ').trim();
     
-    if (modalExists) {
-      log.info('Extracting from modal container...');
-      const modalText = await modalContainer.textContent();
-      const normalizedText = modalText.replace(/\s+/g, ' ').trim();
-      
-      const approvedMatch = normalizedText.match(/Approved\s+At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-      if (approvedMatch) {
-        info.approvedAt = approvedMatch[1];
-        log.info(`Found Approved At: ${approvedMatch[1]}`);
+    log.info('🔍 Searching for certificate fields in page content...');
+    
+    // Extract Approved At date
+    const approvedPatterns = [
+      /Approved\s+At[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+      /Approved[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+    ];
+    
+    for (const pattern of approvedPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.approvedAt = match[1];
+        log.info(`✅ Found Approved At: ${match[1]}`);
+        break;
       }
-      
-      const expirationMatch = normalizedText.match(/Expiration\s+Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-      if (expirationMatch) {
-        info.expirationDate = expirationMatch[1];
-        log.info(`Found Expiration Date: ${expirationMatch[1]}`);
+    }
+    
+    // Extract Expiration Date
+    const expirationPatterns = [
+      /Expiration\s+Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+      /Expiration[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+    ];
+    
+    for (const pattern of expirationPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.expirationDate = match[1];
+        log.info(`✅ Found Expiration Date: ${match[1]}`);
+        break;
       }
-      
-      const addressPatterns = [
-        /Building\s+Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle)\s*[NSEWnsew]?)/i,
-        /(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Cir|Circle)\s*[NSEWnsew]?)\s+Mobile/i,
-      ];
-      
-      for (const pattern of addressPatterns) {
-        const addressMatch = normalizedText.match(pattern);
-        if (addressMatch) {
-          info.buildingAddress = addressMatch[1].trim();
-          log.info(`Found Building Address: ${addressMatch[1]}`);
-          break;
-        }
+    }
+    
+    // Extract Building Address
+    const addressPatterns = [
+      /Building\s+Address[:\s]+(\d+\s+[A-Za-z\s]+(?:Dr|Drive|Rd|Road|St|Street|Ave|Avenue|Ln|Lane|Way|Cir|Circle|Blvd|Boulevard)\.?\s*[NSEWnsew]?)/i,
+      /Building\s+Address[:\s]+(\d+\s+[A-Za-z\s]+)/i,
+    ];
+    
+    for (const pattern of addressPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        // Clean up the address (remove extra spaces)
+        info.buildingAddress = match[1].trim().replace(/\s+/g, ' ');
+        log.info(`✅ Found Building Address: ${info.buildingAddress}`);
+        break;
+      }
+    }
+    
+    // Extract Building City
+    const cityPatterns = [
+      /Building\s+City[:\s]+([A-Za-z\s]+?)(?:\s+Building|\s+Mobile|\s+AL|\s+\d{5}|Hazard)/i,
+    ];
+    
+    for (const pattern of cityPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.buildingCity = match[1].trim();
+        log.info(`✅ Found Building City: ${info.buildingCity}`);
+        break;
+      }
+    }
+    
+    // Extract Building State
+    const statePatterns = [
+      /Building\s+State[:\s]+([A-Z]{2}\s*-\s*[A-Za-z\s]+)/i,
+      /Building\s+State[:\s]+([A-Z]{2})/i,
+    ];
+    
+    for (const pattern of statePatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.buildingState = match[1].trim();
+        log.info(`✅ Found Building State: ${info.buildingState}`);
+        break;
+      }
+    }
+    
+    // Extract Building Zip
+    const zipPatterns = [
+      /Building\s+Zip[:\s]+(\d{5})/i,
+      /(\d{5})\s+Hazard\s+Type/i,
+    ];
+    
+    for (const pattern of zipPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.buildingZip = match[1];
+        log.info(`✅ Found Building Zip: ${info.buildingZip}`);
+        break;
       }
     }
 
+    log.info('📊 Final Certificate Info Summary:');
+    log.info(`   Approved At: ${info.approvedAt || 'NOT FOUND'}`);
+    log.info(`   Expiration Date: ${info.expirationDate || 'NOT FOUND'}`);
+    log.info(`   Building Address: ${info.buildingAddress || 'NOT FOUND'}`);
+    log.info(`   Building City: ${info.buildingCity || 'NOT FOUND'}`);
+    log.info(`   Building State: ${info.buildingState || 'NOT FOUND'}`);
+    log.info(`   Building Zip: ${info.buildingZip || 'NOT FOUND'}`);
+    
     return info;
   } catch (e) {
     log.warning(`Error extracting certificate info: ${e.message}`);
