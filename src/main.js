@@ -273,65 +273,126 @@ async function extractCertificateInfo(page) {
     // Wait for content to load
     await page.waitForTimeout(1000);
 
-    // Strategy: Look for the specific text pattern in the modal
+    // Get all text content
     const pageText = await page.textContent('body');
     
-    log.debug('Full page text (first 500 chars): ' + pageText.substring(0, 500));
+    // Remove excessive whitespace and normalize
+    const normalizedText = pageText.replace(/\s+/g, ' ').trim();
+    
+    log.debug('Normalized text (first 1000 chars): ' + normalizedText.substring(0, 1000));
 
-    // Extract Approved At date - look for MM/DD/YYYY after "Approved At"
-    const approvedMatch = pageText.match(/Approved At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-    if (approvedMatch) {
-      info.approvedAt = approvedMatch[1];
-      log.info(`✅ Found Approved At: ${approvedMatch[1]}`);
-    } else {
+    // Extract Approved At date - more flexible pattern
+    const approvedPatterns = [
+      /Approved\s+At[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+      /Approved At[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+      /ApprovedAt[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+    ];
+    
+    for (const pattern of approvedPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.approvedAt = match[1];
+        log.info(`✅ Found Approved At: ${match[1]}`);
+        break;
+      }
+    }
+    
+    if (!info.approvedAt) {
       log.warning('❌ Approved At: NOT FOUND');
     }
 
-    // Extract Expiration Date - look for MM/DD/YYYY after "Expiration Date"
-    const expirationMatch = pageText.match(/Expiration Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-    if (expirationMatch) {
-      info.expirationDate = expirationMatch[1];
-      log.info(`✅ Found Expiration Date: ${expirationMatch[1]}`);
-    } else {
+    // Extract Expiration Date - more flexible pattern
+    const expirationPatterns = [
+      /Expiration\s+Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+      /Expiration Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+      /ExpirationDate[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
+    ];
+    
+    for (const pattern of expirationPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.expirationDate = match[1];
+        log.info(`✅ Found Expiration Date: ${match[1]}`);
+        break;
+      }
+    }
+    
+    if (!info.expirationDate) {
       log.warning('❌ Expiration Date: NOT FOUND');
     }
 
-    // Extract Building Address - look for address after "Building Address" but before the next field
-    // The pattern looks for: Building Address, then captures everything until we hit "Building Address 2" or "Building City"
-    const addressMatch = pageText.match(/Building Address[:\s]+([\d\s\w]+?)(?=\s*(?:Building Address 2|Building City|Building County))/i);
-    if (addressMatch) {
-      info.buildingAddress = addressMatch[1].trim();
-      log.info(`✅ Found Building Address: ${info.buildingAddress}`);
-    } else {
-      // Fallback: try to get just the street address pattern
-      const addressFallback = pageText.match(/Building Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Blvd|Boulevard|Ct|Court|Pl|Place)\s*[NSEWnsew]?)/i);
-      if (addressFallback) {
-        info.buildingAddress = addressFallback[1].trim();
-        log.info(`✅ Found Building Address (fallback): ${info.buildingAddress}`);
-      } else {
-        log.warning('❌ Building Address: NOT FOUND');
+    // Extract Building Address - more flexible patterns
+    const addressPatterns = [
+      // Pattern 1: Capture until Building City or Building County
+      /Building\s+Address[:\s]+([\d\s\w]+?)\s+(?:Building\s+City|Building\s+County)/i,
+      // Pattern 2: Capture street address pattern
+      /Building\s+Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Blvd|Boulevard|Ct|Court|Pl|Place)\s*[NSEWnsew]?)/i,
+      // Pattern 3: Just capture anything reasonable after Building Address
+      /Building\s+Address[:\s]+([^\s].*?)(?=\s+Building\s+Address\s+2|\s+Building\s+City|$)/i,
+    ];
+    
+    for (const pattern of addressPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match && match[1].trim().length > 3) {
+        info.buildingAddress = match[1].trim();
+        log.info(`✅ Found Building Address: ${info.buildingAddress}`);
+        break;
+      }
+    }
+    
+    if (!info.buildingAddress) {
+      log.warning('❌ Building Address: NOT FOUND');
+      // Try one more approach - look for the specific pattern "520 Novatan Rd S" style addresses
+      const simpleAddressMatch = normalizedText.match(/\b(\d+\s+\w+\s+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane)\s+[NSEWnsew])\b/i);
+      if (simpleAddressMatch) {
+        info.buildingAddress = simpleAddressMatch[1].trim();
+        log.info(`✅ Found Building Address (simple pattern): ${info.buildingAddress}`);
       }
     }
 
     // Extract Building City
-    const cityMatch = pageText.match(/Building City[:\s]+([\w\s]+?)(?=\s*Building County)/i);
-    if (cityMatch) {
-      info.buildingCity = cityMatch[1].trim();
-      log.info(`✅ Found Building City: ${info.buildingCity}`);
+    const cityPatterns = [
+      /Building\s+City[:\s]+([\w\s]+?)\s+(?:Building\s+County|Building\s+State)/i,
+      /Building\s+City[:\s]+([\w\s]+?)(?=\s+Building|\s+Hazard|$)/i,
+    ];
+    
+    for (const pattern of cityPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match && match[1].trim().length > 0) {
+        info.buildingCity = match[1].trim();
+        log.info(`✅ Found Building City: ${info.buildingCity}`);
+        break;
+      }
     }
 
     // Extract Building State
-    const stateMatch = pageText.match(/Building State[:\s]+([\w\s-]+?)(?=\s*Building Zip)/i);
-    if (stateMatch) {
-      info.buildingState = stateMatch[1].trim();
-      log.info(`✅ Found Building State: ${info.buildingState}`);
+    const statePatterns = [
+      /Building\s+State[:\s]+([\w\s-]+?)\s+(?:Building\s+Zip|Hazard)/i,
+      /Building\s+State[:\s]+(AL\s*-\s*Alabama|[A-Z]{2}\s*-\s*[\w\s]+)/i,
+    ];
+    
+    for (const pattern of statePatterns) {
+      const match = normalizedText.match(pattern);
+      if (match && match[1].trim().length > 0) {
+        info.buildingState = match[1].trim();
+        log.info(`✅ Found Building State: ${info.buildingState}`);
+        break;
+      }
     }
 
     // Extract Building Zip
-    const zipMatch = pageText.match(/Building Zip[:\s]+(\d{5}(?:-\d{4})?)/i);
-    if (zipMatch) {
-      info.buildingZip = zipMatch[1].trim();
-      log.info(`✅ Found Building Zip: ${info.buildingZip}`);
+    const zipPatterns = [
+      /Building\s+Zip[:\s]+(\d{5}(?:-\d{4})?)/i,
+      /Building\s+Zip[:\s]+(\d{5})/i,
+    ];
+    
+    for (const pattern of zipPatterns) {
+      const match = normalizedText.match(pattern);
+      if (match) {
+        info.buildingZip = match[1].trim();
+        log.info(`✅ Found Building Zip: ${info.buildingZip}`);
+        break;
+      }
     }
 
     // Log summary
@@ -365,7 +426,7 @@ async function run() {
     loginUrl = 'https://app.ibhs.org/fh',
     addresses: rawAddresses = [],
     address,
-    maxAddressesPerRun = 100, // Increased default for batch processing
+    maxAddressesPerRun = 100,
     politeDelayMs = 800,
     debug = false,
     returnStructuredData = true,
@@ -512,7 +573,6 @@ async function run() {
       await page.waitForTimeout(2000);
       
       // Look specifically for "Search by Address" section
-      // First, try to find the label, then find the input field below it
       const addressSearchLabel = page.locator('text=/Search by Address/i');
       
       if (!(await addressSearchLabel.count())) {
@@ -521,7 +581,6 @@ async function run() {
       }
       
       // Get the search field that comes after "Search by Address"
-      // Try multiple strategies to find the correct input field
       let searchField = null;
       
       const strategies = [
@@ -597,8 +656,8 @@ async function run() {
         
         // Look for dropdown results
         const addressParts = addr.trim().split(/\s+/);
-        const streetNumber = addressParts[0]; // "513"
-        const streetName = addressParts.slice(1, 3).join(' '); // "MALAGA DRIVE" (first 2 words)
+        const streetNumber = addressParts[0];
+        const streetName = addressParts.slice(1, 3).join(' ');
         
         log.info(`Looking for address with: ${streetNumber} ${streetName}`);
         
