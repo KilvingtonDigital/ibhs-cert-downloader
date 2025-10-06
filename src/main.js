@@ -88,6 +88,47 @@ async function debugModalState(page, step) {
   log.info(`🔍 === END DEBUG MODAL ${step} ===`);
 }
 
+// === NEW: SEARCH RESULTS SCREENSHOT FUNCTION ===
+async function saveSearchResultScreenshot(page, address) {
+  try {
+    const timestamp = Date.now();
+    const safeName = sanitizeFileName(address);
+    
+    // Full page screenshot of search results
+    const fullPng = await page.screenshot({ fullPage: true });
+    const fullKey = `search-results-${safeName}-${timestamp}.png`;
+    await Actor.setValue(fullKey, fullPng, { contentType: 'image/png' });
+    log.info(`📸 Saved search results screenshot: ${fullKey}`);
+    
+    // Try to screenshot just the results dropdown/modal if visible
+    const dropdownSelectors = [
+      '[role="listbox"]',
+      '[class*="dropdown"]',
+      '[class*="results"]',
+      '[class*="options"]',
+      '.dropdown-menu',
+      '[class*="select__menu"]',
+      '[class*="option"]'
+    ];
+    
+    for (const selector of dropdownSelectors) {
+      const dropdown = page.locator(selector).first();
+      if (await dropdown.count() > 0 && await dropdown.isVisible()) {
+        const dropdownPng = await dropdown.screenshot();
+        const dropdownKey = `search-dropdown-${safeName}-${timestamp}.png`;
+        await Actor.setValue(dropdownKey, dropdownPng, { contentType: 'image/png' });
+        log.info(`📸 Saved dropdown screenshot: ${dropdownKey}`);
+        return { fullKey, dropdownKey };
+      }
+    }
+    
+    return { fullKey, dropdownKey: null };
+  } catch (e) {
+    log.warning(`⚠️ Search screenshot save failed: ${e.message}`);
+    return { fullKey: null, dropdownKey: null };
+  }
+}
+
 const normalizeAddress = (s = '') =>
   s
     .toLowerCase()
@@ -590,6 +631,13 @@ async function run() {
         continue;
       }
 
+      let searchScreenshots = { fullKey: null, dropdownKey: null };
+      let searchResultsData = {
+        searchResultsCount: 0,
+        selectedResult: null,
+        matchFound: false
+      };
+
       try {
         log.info(`📝 Typing address: ${addr}`);
         await searchField.click();
@@ -608,6 +656,10 @@ async function run() {
         log.info('⏳ Waiting for search results...');
         await page.waitForTimeout(3000);
         
+        // === CAPTURE SEARCH RESULTS SCREENSHOTS ===
+        log.info('📸 Capturing search results screenshots...');
+        searchScreenshots = await saveSearchResultScreenshot(page, addr);
+        
         if (debug) await debugPageState(page, 'ADDRESS_SEARCH_FILTERED_RESULTS');
         
         // Find and click matching address
@@ -619,8 +671,10 @@ async function run() {
         const itemCount = await dropdownItems.count();
         
         log.info(`Found ${itemCount} dropdown items`);
+        searchResultsData.searchResultsCount = itemCount;
         
         let matchFound = false;
+        let selectedItemText = null;
         
         for (let i = 0; i < itemCount; i++) {
           const item = dropdownItems.nth(i);
@@ -633,6 +687,7 @@ async function run() {
             if (itemTextLower.includes(streetNumberLower) && 
                 itemTextLower.includes(streetNameLower)) {
               log.info(`✅ Found matching address at position ${i}!`);
+              selectedItemText = itemText.trim();
               await item.click();
               matchFound = true;
               await page.waitForTimeout(2000);
@@ -646,10 +701,22 @@ async function run() {
         
         if (!matchFound) {
           log.info('Pressing Enter to select first result...');
+          // Get first item text before selecting
+          if (itemCount > 0) {
+            try {
+              selectedItemText = await dropdownItems.first().textContent();
+              selectedItemText = selectedItemText?.trim() || null;
+            } catch (e) {
+              log.debug('Could not read first item text');
+            }
+          }
           await page.keyboard.press('Enter');
           await page.waitForTimeout(2000);
           await page.waitForLoadState('networkidle', { timeout: 60000 });
         }
+        
+        searchResultsData.selectedResult = selectedItemText;
+        searchResultsData.matchFound = matchFound;
         
         // CRITICAL: Extra wait for certificate info to load
         log.info('⏳ Waiting for certificate information to load...');
@@ -667,6 +734,10 @@ async function run() {
             searchAddress: key,
             status: 'search_failed',
             error: `Search failed: ${searchError.message}`,
+            searchScreenshotFull: searchScreenshots.fullKey ? 
+              `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${searchScreenshots.fullKey}` : null,
+            searchScreenshotDropdown: searchScreenshots.dropdownKey ? 
+              `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${searchScreenshots.dropdownKey}` : null,
             timestamp: new Date().toISOString(),
             success: false,
             processedAt: new Date().toISOString()
@@ -718,6 +789,16 @@ async function run() {
             searchAddress: key,
             status: 'no_certificate',
             error: 'No download button found',
+            
+            // Search results info
+            searchScreenshotFull: searchScreenshots.fullKey ? 
+              `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${searchScreenshots.fullKey}` : null,
+            searchScreenshotDropdown: searchScreenshots.dropdownKey ? 
+              `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${searchScreenshots.dropdownKey}` : null,
+            searchResultsCount: searchResultsData.searchResultsCount,
+            selectedResult: searchResultsData.selectedResult,
+            matchFound: searchResultsData.matchFound,
+            
             fhNumber: fhNumber || null,
             buildingAddress: certInfo.buildingAddress || null,
             approvedAt: certInfo.approvedAt || null,
@@ -830,6 +911,17 @@ async function run() {
           searchAddress: key,
           status: downloadStatus,
           success: true,
+          
+          // Search results info
+          searchScreenshotFull: searchScreenshots.fullKey ? 
+            `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${searchScreenshots.fullKey}` : null,
+          searchScreenshotDropdown: searchScreenshots.dropdownKey ? 
+            `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${searchScreenshots.dropdownKey}` : null,
+          searchResultsCount: searchResultsData.searchResultsCount,
+          selectedResult: searchResultsData.selectedResult,
+          matchFound: searchResultsData.matchFound,
+          
+          // Certificate info
           fhNumber: fhNumber || null,
           buildingAddress: certInfo.buildingAddress || null,
           approvedAt: certInfo.approvedAt || null,
