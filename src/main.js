@@ -270,139 +270,84 @@ async function extractCertificateInfo(page) {
       buildingZip: null
     };
 
-    // Wait for content to load
     await page.waitForTimeout(1000);
 
-    // Get all text content
-    const pageText = await page.textContent('body');
-    
-    // Remove excessive whitespace and normalize
-    const normalizedText = pageText.replace(/\s+/g, ' ').trim();
-    
-    log.debug('Normalized text (first 1000 chars): ' + normalizedText.substring(0, 1000));
-
-    // Extract Approved At date - more flexible pattern
-    const approvedPatterns = [
-      /Approved\s+At[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
-      /Approved At[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
-      /ApprovedAt[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
-    ];
-    
-    for (const pattern of approvedPatterns) {
-      const match = normalizedText.match(pattern);
-      if (match) {
-        info.approvedAt = match[1];
-        log.info(`✅ Found Approved At: ${match[1]}`);
-        break;
+    // APPROACH 1: Try to find elements directly by looking for the labels and their adjacent values
+    try {
+      // Find all text elements
+      const allElements = await page.locator('text=/Approved At|Expiration Date|Building Address|Building City|Building State|Building Zip/i').all();
+      
+      for (const element of allElements) {
+        try {
+          const text = await element.textContent();
+          const parent = element.locator('..');
+          const parentText = await parent.textContent();
+          
+          if (/Approved At/i.test(text)) {
+            const dateMatch = parentText.match(/(\d{2}\/\d{2}\/\d{4})/);
+            if (dateMatch && !info.approvedAt) {
+              info.approvedAt = dateMatch[1];
+              log.info(`Found Approved At (DOM): ${dateMatch[1]}`);
+            }
+          }
+          
+          if (/Expiration Date/i.test(text)) {
+            const dateMatch = parentText.match(/(\d{2}\/\d{2}\/\d{4})/);
+            if (dateMatch && !info.expirationDate) {
+              info.expirationDate = dateMatch[1];
+              log.info(`Found Expiration Date (DOM): ${dateMatch[1]}`);
+            }
+          }
+          
+          if (/Building Address/i.test(text) && !/Building Address 2/i.test(text)) {
+            const addressMatch = parentText.match(/Building Address\s+(\d+\s+[\w\s]+?)(?:\s+Building|\s+Mobile|$)/i);
+            if (addressMatch && !info.buildingAddress) {
+              info.buildingAddress = addressMatch[1].trim();
+              log.info(`Found Building Address (DOM): ${addressMatch[1]}`);
+            }
+          }
+        } catch (e) {
+          // Skip this element
+        }
       }
-    }
-    
-    if (!info.approvedAt) {
-      log.warning('❌ Approved At: NOT FOUND');
-    }
-
-    // Extract Expiration Date - more flexible pattern
-    const expirationPatterns = [
-      /Expiration\s+Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
-      /Expiration Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
-      /ExpirationDate[:\s]*(\d{2}\/\d{2}\/\d{4})/i,
-    ];
-    
-    for (const pattern of expirationPatterns) {
-      const match = normalizedText.match(pattern);
-      if (match) {
-        info.expirationDate = match[1];
-        log.info(`✅ Found Expiration Date: ${match[1]}`);
-        break;
-      }
-    }
-    
-    if (!info.expirationDate) {
-      log.warning('❌ Expiration Date: NOT FOUND');
+    } catch (e) {
+      log.debug(`DOM extraction failed: ${e.message}`);
     }
 
-    // Extract Building Address - more flexible patterns
-    const addressPatterns = [
-      // Pattern 1: Capture until Building City or Building County
-      /Building\s+Address[:\s]+([\d\s\w]+?)\s+(?:Building\s+City|Building\s+County)/i,
-      // Pattern 2: Capture street address pattern
-      /Building\s+Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Blvd|Boulevard|Ct|Court|Pl|Place)\s*[NSEWnsew]?)/i,
-      // Pattern 3: Just capture anything reasonable after Building Address
-      /Building\s+Address[:\s]+([^\s].*?)(?=\s+Building\s+Address\s+2|\s+Building\s+City|$)/i,
-    ];
-    
-    for (const pattern of addressPatterns) {
-      const match = normalizedText.match(pattern);
-      if (match && match[1].trim().length > 3) {
-        info.buildingAddress = match[1].trim();
-        log.info(`✅ Found Building Address: ${info.buildingAddress}`);
-        break;
+    // APPROACH 2: Fallback to text extraction if DOM approach didn't work
+    if (!info.approvedAt || !info.expirationDate || !info.buildingAddress) {
+      const pageText = await page.textContent('body');
+      const normalizedText = pageText.replace(/\s+/g, ' ').trim();
+      
+      if (!info.approvedAt) {
+        const approvedMatch = normalizedText.match(/Approved\s+At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+        if (approvedMatch) {
+          info.approvedAt = approvedMatch[1];
+          log.info(`Found Approved At (text): ${approvedMatch[1]}`);
+        }
       }
-    }
-    
-    if (!info.buildingAddress) {
-      log.warning('❌ Building Address: NOT FOUND');
-      // Try one more approach - look for the specific pattern "520 Novatan Rd S" style addresses
-      const simpleAddressMatch = normalizedText.match(/\b(\d+\s+\w+\s+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane)\s+[NSEWnsew])\b/i);
-      if (simpleAddressMatch) {
-        info.buildingAddress = simpleAddressMatch[1].trim();
-        log.info(`✅ Found Building Address (simple pattern): ${info.buildingAddress}`);
+      
+      if (!info.expirationDate) {
+        const expirationMatch = normalizedText.match(/Expiration\s+Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+        if (expirationMatch) {
+          info.expirationDate = expirationMatch[1];
+          log.info(`Found Expiration Date (text): ${expirationMatch[1]}`);
+        }
+      }
+      
+      if (!info.buildingAddress) {
+        const addressMatch = normalizedText.match(/Building\s+Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane)\s*[NSEWnsew]?)/i);
+        if (addressMatch) {
+          info.buildingAddress = addressMatch[1].trim();
+          log.info(`Found Building Address (text): ${addressMatch[1]}`);
+        }
       }
     }
 
-    // Extract Building City
-    const cityPatterns = [
-      /Building\s+City[:\s]+([\w\s]+?)\s+(?:Building\s+County|Building\s+State)/i,
-      /Building\s+City[:\s]+([\w\s]+?)(?=\s+Building|\s+Hazard|$)/i,
-    ];
-    
-    for (const pattern of cityPatterns) {
-      const match = normalizedText.match(pattern);
-      if (match && match[1].trim().length > 0) {
-        info.buildingCity = match[1].trim();
-        log.info(`✅ Found Building City: ${info.buildingCity}`);
-        break;
-      }
-    }
-
-    // Extract Building State
-    const statePatterns = [
-      /Building\s+State[:\s]+([\w\s-]+?)\s+(?:Building\s+Zip|Hazard)/i,
-      /Building\s+State[:\s]+(AL\s*-\s*Alabama|[A-Z]{2}\s*-\s*[\w\s]+)/i,
-    ];
-    
-    for (const pattern of statePatterns) {
-      const match = normalizedText.match(pattern);
-      if (match && match[1].trim().length > 0) {
-        info.buildingState = match[1].trim();
-        log.info(`✅ Found Building State: ${info.buildingState}`);
-        break;
-      }
-    }
-
-    // Extract Building Zip
-    const zipPatterns = [
-      /Building\s+Zip[:\s]+(\d{5}(?:-\d{4})?)/i,
-      /Building\s+Zip[:\s]+(\d{5})/i,
-    ];
-    
-    for (const pattern of zipPatterns) {
-      const match = normalizedText.match(pattern);
-      if (match) {
-        info.buildingZip = match[1].trim();
-        log.info(`✅ Found Building Zip: ${info.buildingZip}`);
-        break;
-      }
-    }
-
-    // Log summary
-    log.info('📋 Extracted Certificate Info:');
+    log.info('Certificate Info Summary:');
     log.info(`   Approved At: ${info.approvedAt || 'NOT FOUND'}`);
     log.info(`   Expiration Date: ${info.expirationDate || 'NOT FOUND'}`);
     log.info(`   Building Address: ${info.buildingAddress || 'NOT FOUND'}`);
-    log.info(`   Building City: ${info.buildingCity || 'NOT FOUND'}`);
-    log.info(`   Building State: ${info.buildingState || 'NOT FOUND'}`);
-    log.info(`   Building Zip: ${info.buildingZip || 'NOT FOUND'}`);
     
     return info;
   } catch (e) {
