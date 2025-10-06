@@ -196,7 +196,7 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
 
   log.info('⏳ Waiting for login to complete...');
   const loginGone = page.waitForSelector(emailSel, { state: 'detached', timeout: 30_000 }).catch(() => null);
-  const appHint   = page.waitForSelector('text=/Certificates?|Search/i', { timeout: 30_000 }).catch(() => null);
+  const appHint   = page.waitForSelector('text=/Certificates?|Search|New Evaluation/i', { timeout: 30_000 }).catch(() => null);
   await Promise.race([loginGone, appHint]);
 
   if (await page.locator(emailSel).count()) {
@@ -214,6 +214,152 @@ async function ensureLoggedIn(page, { loginUrl, username, password, politeDelayM
   await sleep(jitter(politeDelayMs));
 }
 
+/**
+ * Extract FH/FEH number from the page
+ */
+async function extractFHNumber(page) {
+  try {
+    // Look for FH or FEH followed by numbers (like FH25019884 or FEH365550202)
+    const patterns = [
+      // Look in the page text
+      page.locator('text=/FE?H\\d+/i').first(),
+      // Look in FORTIFIED ID column/field
+      page.locator('[class*="fortified"], [id*="fortified"], text=/FORTIFIED ID/i').locator('..').locator('text=/FE?H\\d+/i').first(),
+      // Look in any table cells
+      page.locator('td, div, span').filter({ hasText: /FE?H\d+/i }).first(),
+    ];
+
+    for (const pattern of patterns) {
+      if (await pattern.count()) {
+        const text = await pattern.textContent();
+        const match = text?.match(/FE?H\d+/i);
+        if (match) {
+          log.info(`Found FH/FEH number: ${match[0]}`);
+          return match[0].toUpperCase();
+        }
+      }
+    }
+
+    // Try to extract from URL as well
+    const url = page.url();
+    const urlMatch = url.match(/FE?H\d+/i);
+    if (urlMatch) {
+      log.info(`Found FH/FEH number in URL: ${urlMatch[0]}`);
+      return urlMatch[0].toUpperCase();
+    }
+
+    log.warning('No FH/FEH number found');
+    return null;
+  } catch (e) {
+    log.warning(`Error extracting FH/FEH number: ${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * Extract certificate dates and building address from the page
+ */
+async function extractCertificateInfo(page) {
+  try {
+    const info = {
+      approvedAt: null,
+      expirationDate: null,
+      buildingAddress: null,
+      buildingCity: null,
+      buildingState: null,
+      buildingZip: null
+    };
+
+    // Strategy 1: Look for specific label elements and their values
+    const labels = ['Approved At', 'Expiration Date', 'Building Address', 'Building City', 'Building State', 'Building Zip'];
+    
+    for (const label of labels) {
+      try {
+        const labelElement = page.locator(`text="${label}"`).first();
+        
+        if (await labelElement.count() > 0) {
+          const container = labelElement.locator('xpath=ancestor::div[1]');
+          const containerText = await container.textContent();
+          
+          log.debug(`Found "${label}" container: ${containerText?.substring(0, 100)}`);
+          
+          if (label === 'Approved At' || label === 'Expiration Date') {
+            const dateMatch = containerText?.match(/\d{2}\/\d{2}\/\d{4}/);
+            if (dateMatch) {
+              const key = label === 'Approved At' ? 'approvedAt' : 'expirationDate';
+              info[key] = dateMatch[0];
+              log.info(`✅ Extracted ${label}: ${dateMatch[0]}`);
+            }
+          } else if (label === 'Building Address') {
+            const addressMatch = containerText?.match(/Building Address\s*([^\n]+)/i);
+            if (addressMatch && addressMatch[1].trim()) {
+              info.buildingAddress = addressMatch[1].trim();
+              log.info(`✅ Extracted Building Address: ${addressMatch[1].trim()}`);
+            }
+          } else if (label === 'Building City') {
+            const cityMatch = containerText?.match(/Building City\s*([^\n]+)/i);
+            if (cityMatch && cityMatch[1].trim()) {
+              info.buildingCity = cityMatch[1].trim();
+              log.info(`✅ Extracted Building City: ${cityMatch[1].trim()}`);
+            }
+          }
+        }
+      } catch (e) {
+        log.debug(`Could not find ${label}: ${e.message}`);
+      }
+    }
+
+    // Strategy 2: Full page text extraction as fallback
+    if (!info.approvedAt || !info.expirationDate || !info.buildingAddress) {
+      log.debug('Trying full-page text extraction...');
+      
+      const allText = await page.textContent('body');
+      
+      if (!info.approvedAt) {
+        const approvedMatch = allText.match(/Approved At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+        if (approvedMatch) {
+          info.approvedAt = approvedMatch[1];
+          log.info(`✅ Found Approved At: ${approvedMatch[1]}`);
+        }
+      }
+      
+      if (!info.expirationDate) {
+        const expirationMatch = allText.match(/Expiration Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+        if (expirationMatch) {
+          info.expirationDate = expirationMatch[1];
+          log.info(`✅ Found Expiration Date: ${expirationMatch[1]}`);
+        }
+      }
+      
+      if (!info.buildingAddress) {
+        const addressMatch = allText.match(/Building Address[:\s]*([^\n]+?)(?:\s{2,}|Building Address 2)/i);
+        if (addressMatch && addressMatch[1].trim()) {
+          info.buildingAddress = addressMatch[1].trim();
+          log.info(`✅ Found Building Address: ${addressMatch[1].trim()}`);
+        }
+      }
+    }
+
+    // Log summary
+    log.info('📋 Extracted Certificate Info:');
+    log.info(`   Approved At: ${info.approvedAt || 'NOT FOUND'}`);
+    log.info(`   Expiration Date: ${info.expirationDate || 'NOT FOUND'}`);
+    log.info(`   Building Address: ${info.buildingAddress || 'NOT FOUND'}`);
+    
+    return info;
+  } catch (e) {
+    log.warning(`Error extracting certificate info: ${e.message}`);
+    return {
+      approvedAt: null,
+      expirationDate: null,
+      buildingAddress: null,
+      buildingCity: null,
+      buildingState: null,
+      buildingZip: null
+    };
+  }
+}
+
 async function run() {
   await Actor.init();
 
@@ -222,7 +368,7 @@ async function run() {
     loginUrl = 'https://app.ibhs.org/fh',
     addresses: rawAddresses = [],
     address,
-    maxAddressesPerRun = 1,
+    maxAddressesPerRun = 100, // Increased default for batch processing
     politeDelayMs = 800,
     debug = false,
     returnStructuredData = true,
@@ -232,11 +378,16 @@ async function run() {
 
   let addresses = [];
   
+  // Handle single address (n8n will often send one at a time)
   if (address && typeof address === 'string') {
     addresses = [address.trim()];
-  } else if (Array.isArray(rawAddresses)) {
-    addresses = rawAddresses;
-  } else if (typeof rawAddresses === 'string') {
+  } 
+  // Handle array of addresses (batch processing)
+  else if (Array.isArray(rawAddresses)) {
+    addresses = rawAddresses.map(a => typeof a === 'string' ? a.trim() : a.address?.trim()).filter(Boolean);
+  } 
+  // Handle newline-separated addresses
+  else if (typeof rawAddresses === 'string') {
     addresses = rawAddresses.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   }
 
@@ -293,90 +444,213 @@ async function run() {
 
       log.info(`🎯 Processing address: ${addr}`);
 
-      await debugPageState(page, 'BEFORE_SEARCH');
-
-      log.info(`🔍 Searching for: ${addr}`);
-
-      log.info('⏳ Waiting for page to be fully loaded...');
-      await page.waitForTimeout(3000);
-      await page.waitForLoadState('networkidle');
-
-      let searchField = null;
-      const strategies = [
-        () => page.getByPlaceholder('Search'),
-        () => page.locator('input[type="search"][placeholder="Search"]'),
-        () => page.locator('#grid_1544421861_0_searchbar'),
-        () => page.locator('input[type="search"]:not([aria-label="clipboard"])'),
-        () => page.locator('[placeholder*="search" i]:not([aria-label="clipboard"])'),
-        () => page.locator('[aria-label*="search" i]:not([aria-label="clipboard"])'),
-      ];
-
-      for (let i = 0; i < strategies.length; i++) {
-        try {
-          log.info(`🔍 Trying search strategy ${i + 1}...`);
-          const element = strategies[i]();
-          
-          await element.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
-          
-          const count = await element.count();
-          
-          if (count > 0) {
-            const isVisible = await element.isVisible();
-            const isEnabled = await element.isEnabled();
-            log.info(`  Found ${count} elements, visible: ${isVisible}, enabled: ${isEnabled}`);
-            
-            if (isVisible && isEnabled) {
-              searchField = element;
-              log.info(`✅ Using search strategy ${i + 1}`);
-              break;
-            }
-          }
-        } catch (e) {
-          log.info(`  Strategy ${i + 1} failed: ${e.message}`);
+      // === NEW FLOW: Click "New Evaluation" ===
+      log.info('📋 Clicking "New Evaluation"...');
+      const newEvalButton = page.getByText(/^\s*New Evaluation\s*$/i).first();
+      
+      if (!(await newEvalButton.count())) {
+        log.error('❌ "New Evaluation" button not found');
+        await debugPageState(page, 'NO_NEW_EVALUATION_BUTTON');
+        
+        if (returnStructuredData) {
+          await Actor.pushData({
+            address: addr,
+            searchAddress: key,
+            status: 'navigation_error',
+            error: 'New Evaluation button not found',
+            timestamp: new Date().toISOString(),
+            success: false,
+            processedAt: new Date().toISOString()
+          });
         }
+        
+        processed[key] = { status: 'navigation_error' };
+        await saveProcessed(processed);
+        handled++;
+        continue;
       }
 
-      if (!searchField) {
-        await debugPageState(page, 'NO_SEARCH_FIELD');
-        log.warning('Search field not found; reloading shell once.');
-        await page.reload({ waitUntil: 'networkidle' });
-        await sleep(jitter(politeDelayMs));
+      await newEvalButton.click();
+      await sleep(jitter(politeDelayMs));
+      await page.waitForLoadState('networkidle');
+
+      if (debug) await debugPageState(page, 'AFTER_NEW_EVALUATION_CLICK');
+
+      // === Click "Redesignation" ===
+      log.info('🔄 Clicking "Redesignation"...');
+      const redesignationButton = page.getByText(/^\s*Redesignation\s*$/i).first();
+      
+      if (!(await redesignationButton.count())) {
+        log.error('❌ "Redesignation" button not found');
+        await debugPageState(page, 'NO_REDESIGNATION_BUTTON');
         
-        searchField = page.getByPlaceholder('Search');
-        if (!(await searchField.count())) {
-          await debugPageState(page, 'STILL_NO_SEARCH_FIELD');
-          
-          if (returnStructuredData) {
-            await Actor.pushData({
-              address: addr,
-              searchAddress: key,
-              status: 'no_search_field',
-              error: 'Could not find search field on page',
-              processedAt: new Date().toISOString()
-            });
-          }
-          
-          processed[key] = { status: 'no_search_field' };
-          await saveProcessed(processed);
-          handled++;
-          continue;
+        if (returnStructuredData) {
+          await Actor.pushData({
+            address: addr,
+            searchAddress: key,
+            status: 'navigation_error',
+            error: 'Redesignation button not found',
+            timestamp: new Date().toISOString(),
+            success: false,
+            processedAt: new Date().toISOString()
+          });
         }
+        
+        processed[key] = { status: 'navigation_error' };
+        await saveProcessed(processed);
+        handled++;
+        continue;
+      }
+
+      await redesignationButton.click();
+      await sleep(jitter(politeDelayMs));
+      await page.waitForLoadState('networkidle');
+
+      if (debug) await debugPageState(page, 'AFTER_REDESIGNATION_CLICK');
+
+      // === Search for address ===
+      log.info(`🔍 Searching for address: ${addr}`);
+      
+      // Wait for the modal to fully load
+      await page.waitForTimeout(2000);
+      
+      // Look specifically for "Search by Address" section
+      // First, try to find the label, then find the input field below it
+      const addressSearchLabel = page.locator('text=/Search by Address/i');
+      
+      if (!(await addressSearchLabel.count())) {
+        log.error('❌ "Search by Address" label not found');
+        await debugPageState(page, 'NO_ADDRESS_SEARCH_LABEL');
+      }
+      
+      // Get the search field that comes after "Search by Address"
+      // Try multiple strategies to find the correct input field
+      let searchField = null;
+      
+      const strategies = [
+        // Strategy 1: Find input after "Search by Address" text
+        () => page.locator('text=/Search by Address/i').locator('..').locator('input[placeholder*="Type to search" i]'),
+        // Strategy 2: Find the second "Type to search" input in the modal
+        () => page.locator('input[placeholder*="Type to search" i]').nth(1),
+        // Strategy 3: Find input with specific structure
+        () => page.locator('input[placeholder*="Type to search" i]').filter({ hasText: '' }).nth(1),
+      ];
+      
+      for (let i = 0; i < strategies.length; i++) {
+        try {
+          const element = strategies[i]();
+          if (await element.count() > 0 && await element.isVisible()) {
+            searchField = element;
+            log.info(`✅ Found address search field using strategy ${i + 1}`);
+            break;
+          }
+        } catch (e) {
+          log.debug(`Strategy ${i + 1} failed: ${e.message}`);
+        }
+      }
+      
+      if (!searchField) {
+        searchField = page.locator('input[placeholder*="Type to search" i]').nth(1);
+      }
+      
+      if (!(await searchField.count())) {
+        log.error('❌ Search field not found in redesignation flow');
+        await debugPageState(page, 'NO_SEARCH_FIELD_REDESIGNATION');
+        
+        if (returnStructuredData) {
+          await Actor.pushData({
+            address: addr,
+            searchAddress: key,
+            status: 'no_search_field',
+            error: 'Search field not found in redesignation flow',
+            timestamp: new Date().toISOString(),
+            success: false,
+            processedAt: new Date().toISOString()
+          });
+        }
+        
+        processed[key] = { status: 'no_search_field' };
+        await saveProcessed(processed);
+        handled++;
+        continue;
       }
 
       try {
-        log.info(`📝 Filling search field with: ${addr}`);
+        log.info(`📝 Typing address into search field: ${addr}`);
         await searchField.click();
         await page.waitForTimeout(500);
-        await searchField.fill(addr);
-        await sleep(jitter(500));
         
-        log.info(`⌨️ Pressing Enter to search...`);
-        await page.keyboard.press('Enter');
+        // Clear the field first
+        await searchField.press('Control+A');
+        await page.waitForTimeout(100);
+        await searchField.press('Backspace');
+        await page.waitForTimeout(300);
         
-        await page.waitForLoadState('networkidle', { timeout: 60_000 });
-        await sleep(jitter(politeDelayMs));
+        // Type the address CHARACTER BY CHARACTER to trigger filtering
+        log.info('⌨️ Typing character by character...');
+        for (const char of addr) {
+          await searchField.type(char, { delay: jitter(100, 80) });
+        }
         
-        await debugPageState(page, 'AFTER_SEARCH');
+        // Wait for dropdown to filter and populate
+        log.info('⏳ Waiting for filtered search results...');
+        await page.waitForTimeout(2000);
+        
+        if (debug) await debugPageState(page, 'ADDRESS_SEARCH_FILTERED_RESULTS');
+        
+        // Look for dropdown results
+        const addressParts = addr.trim().split(/\s+/);
+        const streetNumber = addressParts[0]; // "513"
+        const streetName = addressParts.slice(1, 3).join(' '); // "MALAGA DRIVE" (first 2 words)
+        
+        log.info(`Looking for address with: ${streetNumber} ${streetName}`);
+        
+        // Try to find exact match in filtered dropdown
+        const dropdownItems = page.locator('[role="option"], .dropdown-item, .result-item, [class*="option"], [class*="result"]');
+        const itemCount = await dropdownItems.count();
+        
+        log.info(`Found ${itemCount} filtered dropdown items`);
+        
+        let matchFound = false;
+        
+        // Iterate through dropdown items to find exact match
+        for (let i = 0; i < itemCount; i++) {
+          const item = dropdownItems.nth(i);
+          try {
+            const itemText = await item.textContent();
+            const preview = itemText?.substring(0, 80) || '';
+            log.info(`  Item ${i}: ${preview}`);
+            
+            const itemTextLower = (itemText || '').toLowerCase();
+            const streetNumberLower = streetNumber.toLowerCase();
+            const streetNameLower = streetName.toLowerCase();
+            
+            // Check if this item contains our street number AND street name
+            if (itemTextLower.includes(streetNumberLower) && 
+                itemTextLower.includes(streetNameLower)) {
+              log.info(`✅ Found matching address at position ${i}!`);
+              await item.click();
+              matchFound = true;
+              await sleep(jitter(politeDelayMs));
+              await page.waitForLoadState('networkidle');
+              break;
+            }
+          } catch (e) {
+            log.debug(`Could not read item ${i}: ${e.message}`);
+          }
+        }
+        
+        if (!matchFound) {
+          log.warning('⚠️ No exact match found in filtered dropdown');
+          
+          // Try pressing Enter to select the first filtered result
+          log.info('Pressing Enter to select first result...');
+          await page.keyboard.press('Enter');
+          await sleep(jitter(politeDelayMs));
+          await page.waitForLoadState('networkidle');
+        }
+        
+        if (debug) await debugPageState(page, 'AFTER_ADDRESS_SELECT');
         
       } catch (searchError) {
         log.error(`❌ Search failed: ${searchError.message}`);
@@ -388,6 +662,8 @@ async function run() {
             searchAddress: key,
             status: 'search_failed',
             error: `Search failed: ${searchError.message}`,
+            timestamp: new Date().toISOString(),
+            success: false,
             processedAt: new Date().toISOString()
           });
         }
@@ -398,33 +674,78 @@ async function run() {
         continue;
       }
 
-      // Look for Download button directly in search results
-      log.info('⏳ Waiting for search results to load...');
+      // === Extract Certificate Information ===
+      log.info('📅 Extracting certificate information...');
       await page.waitForTimeout(2000);
+      
+      // Verify we have the correct address loaded
+      const pageContent = await page.content();
+      const addressParts = addr.toLowerCase().split(/\s+/);
+      const streetNumber = addressParts[0];
+      
+      // Check if the page contains our street number
+      if (!pageContent.toLowerCase().includes(streetNumber)) {
+        log.warning(`⚠️ Warning: Street number ${streetNumber} not found on results page`);
+        log.warning('This might be the wrong address!');
+        
+        if (debug) await debugPageState(page, 'POSSIBLE_WRONG_ADDRESS');
+      }
+      
+      // Extract FH/FEH number
+      const fhNumber = await extractFHNumber(page);
+      log.info(`🔢 FH/FEH Number: ${fhNumber || 'Not found'}`);
+      
+      // Extract all certificate information (dates + building address)
+      const certInfo = await extractCertificateInfo(page);
+      
+      log.info('📋 Certificate Information Summary:');
+      log.info(`   FH Number: ${fhNumber || 'NOT FOUND'}`);
+      log.info(`   Building Address: ${certInfo.buildingAddress || 'NOT FOUND'}`);
+      log.info(`   Approved At: ${certInfo.approvedAt || 'NOT FOUND'}`);
+      log.info(`   Expiration Date: ${certInfo.expirationDate || 'NOT FOUND'}`);
+
+      // Look for Download button or certificate download option
+      log.info('🔍 Looking for certificate download option...');
+      await page.waitForTimeout(1000);
 
       const downloadButton = page.getByText(/^\s*Download\s*$/i).first();
       const hasDownload = await downloadButton.count();
 
       if (!hasDownload) {
-        log.warning('No Download button found in search results');
+        log.warning('No Download button found');
         
         if (returnStructuredData) {
           await Actor.pushData({
             address: addr,
             searchAddress: key,
             status: 'no_certificate',
-            error: 'No download button found in search results',
+            error: 'No download button found',
+            fhNumber: fhNumber || null,
+            buildingAddress: certInfo.buildingAddress || null,
+            approvedAt: certInfo.approvedAt || null,
+            expirationDate: certInfo.expirationDate || null,
+            timestamp: new Date().toISOString(),
+            success: false,
             processedAt: new Date().toISOString()
           });
         }
         
-        processed[key] = { status: 'no_certificate' };
+        processed[key] = { 
+          status: 'no_certificate',
+          fhNumber: fhNumber || null,
+          buildingAddress: certInfo.buildingAddress || null,
+          approvedAt: certInfo.approvedAt || null,
+          expirationDate: certInfo.expirationDate || null,
+        };
         await saveProcessed(processed);
         handled++;
+        
+        // Go back to main page for next iteration
+        await page.goto(loginUrl, { waitUntil: 'networkidle' });
         continue;
       }
 
-      log.info('✅ Found Download button in search results');
+      log.info('✅ Found Download button');
 
       // Download the certificate
       if (debug) await snapshot(page, `pre-download-${key}`);
@@ -479,19 +800,13 @@ async function run() {
         }
       }
 
-      // Try to get expiration date from the table row
-      let expires = '';
-      try {
-        const expiresCell = page.locator('text=/expires/i').first();
-        if (await expiresCell.count()) {
-          const cellText = await expiresCell.textContent();
-          expires = cellText?.trim() || '';
-        }
-      } catch {}
-
-      const basePretty = `${key}${expires ? ` - Expires ${expires}` : ''}`.replace(/\s+/g, ' ');
+      const approvedAt = certInfo.approvedAt || '';
+      const expirationDate = certInfo.expirationDate || '';
+      const buildingAddress = certInfo.buildingAddress || '';
+      
+      const basePretty = `${fhNumber || key}${expirationDate ? ` - Expires ${expirationDate}` : ''}`.replace(/\s+/g, ' ');
       const prettyName = sanitizeFileName(`${basePretty}.pdf`);
-      const kvName = kvSafeKey(`${key}-certificate.pdf`);
+      const kvName = kvSafeKey(`${fhNumber || key}-certificate.pdf`);
 
       if (!buffer || buffer.length === 0) {
         log.warning(`PDF buffer empty for ${key}; not saving.`);
@@ -545,15 +860,34 @@ async function run() {
       
       if (returnStructuredData) {
         await Actor.pushData({
+          // Input data
           address: addr,
           searchAddress: key,
+          
+          // Status
           status: downloadStatus,
+          success: true,
+          
+          // Certificate details
+          fhNumber: fhNumber || null,
+          buildingAddress: buildingAddress || null,
+          approvedAt: approvedAt || null,
+          expirationDate: expirationDate || null,
+          
+          // File information
           certificateFile: kvName,
           fileName: prettyName,
           fileSize: buffer ? buffer.length : 0,
-          expires: expires || null,
+          
+          // Google Drive links (if uploaded)
           googleDriveFileId: driveFileId,
           googleDriveLink: driveWebViewLink,
+          
+          // Download URLs for n8n to fetch
+          apifyDownloadUrl: driveFileId ? null : `https://api.apify.com/v2/key-value-stores/${Actor.getEnv().defaultKeyValueStoreId}/records/${kvName}`,
+          
+          // Timestamps
+          timestamp: new Date().toISOString(),
           downloadedAt: new Date().toISOString(),
           processedAt: new Date().toISOString()
         });
@@ -563,17 +897,33 @@ async function run() {
         status: downloadStatus, 
         file: kvName, 
         when: new Date().toISOString(),
+        fhNumber: fhNumber || null,
+        buildingAddress: buildingAddress || null,
         fileSize: buffer ? buffer.length : 0,
-        expires: expires || null
+        approvedAt: approvedAt || null,
+        expirationDate: expirationDate || null,
       };
       await saveProcessed(processed);
 
+      // Go back to main page for next address
+      log.info('🔙 Returning to main page...');
+      await page.goto(loginUrl, { waitUntil: 'networkidle' });
       await page.waitForTimeout(1000);
 
       handled++;
     }
 
     log.info(`Run complete. Addresses handled: ${handled}`);
+    
+    // Set output for easy n8n access
+    await Actor.setOutput({
+      summary: {
+        totalAddresses: addresses.length,
+        processedAddresses: handled,
+        timestamp: new Date().toISOString()
+      }
+    });
+    
   } finally {
     await browser.close().catch(() => {});
     await Actor.exit();

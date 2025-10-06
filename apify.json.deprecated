@@ -1,0 +1,136 @@
+{
+  "actorSpecification": 1,
+  "name": "ibhs-cert-downloader",
+  "title": "IBHS Certificate Downloader (n8n Ready)",
+  "version": "1.0",
+  "buildTag": "latest",
+  "dockerfile": "Dockerfile",
+  "description": "Downloads IBHS Fortified Home certificates with full metadata. Designed for n8n automation workflows.",
+  "input": {
+    "title": "Input Schema",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+      "address": {
+        "title": "Single Address",
+        "type": "string",
+        "editor": "textfield",
+        "description": "Single address to search for. n8n will typically pass this dynamically. Example: '513 MALAGA DRIVE'",
+        "example": "520 Novatan Rd S, Mobile, AL 36608"
+      },
+      "addresses": {
+        "title": "Multiple Addresses (Batch)",
+        "type": "array",
+        "editor": "stringList",
+        "description": "Array of addresses for batch processing. Each can be a string or an object with an 'address' property.",
+        "example": ["513 MALAGA DRIVE", "520 Novatan Rd S"]
+      },
+      "loginUrl": {
+        "title": "Login URL",
+        "type": "string",
+        "default": "https://app.ibhs.org/fh",
+        "editor": "textfield",
+        "description": "IBHS Fortified Home login page URL."
+      },
+      "maxAddressesPerRun": {
+        "title": "Max addresses per run",
+        "type": "integer",
+        "default": 100,
+        "editor": "number",
+        "description": "Maximum number of addresses to process in a single run. Useful for rate limiting."
+      },
+      "politeDelayMs": {
+        "title": "Baseline delay (ms)",
+        "type": "integer",
+        "default": 800,
+        "editor": "number",
+        "description": "Base delay (with random jitter) between actions to avoid rate limiting."
+      },
+      "debug": {
+        "title": "Debug mode",
+        "type": "boolean",
+        "default": false,
+        "editor": "checkbox",
+        "description": "Run browser in headed mode with screenshots. Only use for testing."
+      },
+      "returnStructuredData": {
+        "title": "Return structured data",
+        "type": "boolean",
+        "default": true,
+        "editor": "checkbox",
+        "description": "Return certificate data as structured JSON for n8n processing."
+      },
+      "username": {
+        "title": "IBHS username (Testing Only)",
+        "type": "string",
+        "editor": "textfield",
+        "description": "⚠️ Use IBHS_USERNAME secret instead. This is only for local testing."
+      },
+      "password": {
+        "title": "IBHS password (Testing Only)",
+        "type": "string",
+        "editor": "textfield",
+        "description": "⚠️ Use IBHS_PASSWORD secret instead. This is only for local testing."
+      }
+    },
+    "required": []
+  },
+  "storages": {
+    "dataset": {
+      "actorSpecification": 1,
+      "title": "Certificate Data Output",
+      "description": "Structured certificate data with FH numbers, dates, and download links",
+      "views": {
+        "overview": {
+          "title": "Overview",
+          "transformation": {
+            "fields": [
+              "address",
+              "fhNumber",
+              "buildingAddress",
+              "approvedAt",
+              "expirationDate",
+              "status",
+              "success",
+              "googleDriveLink",
+              "fileName"
+            ]
+          },
+          "display": {
+            "component": "table",
+            "properties": {
+              "address": {
+                "label": "Search Address",
+                "format": "text"
+              },
+              "fhNumber": {
+                "label": "FH Number",
+                "format": "text"
+              },
+              "buildingAddress": {
+                "label": "Building Address",
+                "format": "text"
+              },
+              "approvedAt": {
+                "label": "Approved At",
+                "format": "date"
+              },
+              "expirationDate": {
+                "label": "Expiration Date",
+                "format": "date"
+              },
+              "status": {
+                "label": "Status",
+                "format": "text"
+              },
+              "success": {
+                "label": "Success",
+                "format": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
