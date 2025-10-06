@@ -270,74 +270,68 @@ async function extractCertificateInfo(page) {
       buildingZip: null
     };
 
-    // Strategy 1: Look for specific label elements and their values
-    const labels = ['Approved At', 'Expiration Date', 'Building Address', 'Building City', 'Building State', 'Building Zip'];
+    // Wait for content to load
+    await page.waitForTimeout(1000);
+
+    // Strategy: Look for the specific text pattern in the modal
+    const pageText = await page.textContent('body');
     
-    for (const label of labels) {
-      try {
-        const labelElement = page.locator(`text="${label}"`).first();
-        
-        if (await labelElement.count() > 0) {
-          const container = labelElement.locator('xpath=ancestor::div[1]');
-          const containerText = await container.textContent();
-          
-          log.debug(`Found "${label}" container: ${containerText?.substring(0, 100)}`);
-          
-          if (label === 'Approved At' || label === 'Expiration Date') {
-            const dateMatch = containerText?.match(/\d{2}\/\d{2}\/\d{4}/);
-            if (dateMatch) {
-              const key = label === 'Approved At' ? 'approvedAt' : 'expirationDate';
-              info[key] = dateMatch[0];
-              log.info(`✅ Extracted ${label}: ${dateMatch[0]}`);
-            }
-          } else if (label === 'Building Address') {
-            const addressMatch = containerText?.match(/Building Address\s*([^\n]+)/i);
-            if (addressMatch && addressMatch[1].trim()) {
-              info.buildingAddress = addressMatch[1].trim();
-              log.info(`✅ Extracted Building Address: ${addressMatch[1].trim()}`);
-            }
-          } else if (label === 'Building City') {
-            const cityMatch = containerText?.match(/Building City\s*([^\n]+)/i);
-            if (cityMatch && cityMatch[1].trim()) {
-              info.buildingCity = cityMatch[1].trim();
-              log.info(`✅ Extracted Building City: ${cityMatch[1].trim()}`);
-            }
-          }
-        }
-      } catch (e) {
-        log.debug(`Could not find ${label}: ${e.message}`);
+    log.debug('Full page text (first 500 chars): ' + pageText.substring(0, 500));
+
+    // Extract Approved At date - look for MM/DD/YYYY after "Approved At"
+    const approvedMatch = pageText.match(/Approved At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+    if (approvedMatch) {
+      info.approvedAt = approvedMatch[1];
+      log.info(`✅ Found Approved At: ${approvedMatch[1]}`);
+    } else {
+      log.warning('❌ Approved At: NOT FOUND');
+    }
+
+    // Extract Expiration Date - look for MM/DD/YYYY after "Expiration Date"
+    const expirationMatch = pageText.match(/Expiration Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
+    if (expirationMatch) {
+      info.expirationDate = expirationMatch[1];
+      log.info(`✅ Found Expiration Date: ${expirationMatch[1]}`);
+    } else {
+      log.warning('❌ Expiration Date: NOT FOUND');
+    }
+
+    // Extract Building Address - look for address after "Building Address" but before the next field
+    // The pattern looks for: Building Address, then captures everything until we hit "Building Address 2" or "Building City"
+    const addressMatch = pageText.match(/Building Address[:\s]+([\d\s\w]+?)(?=\s*(?:Building Address 2|Building City|Building County))/i);
+    if (addressMatch) {
+      info.buildingAddress = addressMatch[1].trim();
+      log.info(`✅ Found Building Address: ${info.buildingAddress}`);
+    } else {
+      // Fallback: try to get just the street address pattern
+      const addressFallback = pageText.match(/Building Address[:\s]+(\d+\s+[\w\s]+(?:Rd|Road|St|Street|Ave|Avenue|Dr|Drive|Ln|Lane|Way|Blvd|Boulevard|Ct|Court|Pl|Place)\s*[NSEWnsew]?)/i);
+      if (addressFallback) {
+        info.buildingAddress = addressFallback[1].trim();
+        log.info(`✅ Found Building Address (fallback): ${info.buildingAddress}`);
+      } else {
+        log.warning('❌ Building Address: NOT FOUND');
       }
     }
 
-    // Strategy 2: Full page text extraction as fallback
-    if (!info.approvedAt || !info.expirationDate || !info.buildingAddress) {
-      log.debug('Trying full-page text extraction...');
-      
-      const allText = await page.textContent('body');
-      
-      if (!info.approvedAt) {
-        const approvedMatch = allText.match(/Approved At[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-        if (approvedMatch) {
-          info.approvedAt = approvedMatch[1];
-          log.info(`✅ Found Approved At: ${approvedMatch[1]}`);
-        }
-      }
-      
-      if (!info.expirationDate) {
-        const expirationMatch = allText.match(/Expiration Date[:\s]*(\d{2}\/\d{2}\/\d{4})/i);
-        if (expirationMatch) {
-          info.expirationDate = expirationMatch[1];
-          log.info(`✅ Found Expiration Date: ${expirationMatch[1]}`);
-        }
-      }
-      
-      if (!info.buildingAddress) {
-        const addressMatch = allText.match(/Building Address[:\s]*([^\n]+?)(?:\s{2,}|Building Address 2)/i);
-        if (addressMatch && addressMatch[1].trim()) {
-          info.buildingAddress = addressMatch[1].trim();
-          log.info(`✅ Found Building Address: ${addressMatch[1].trim()}`);
-        }
-      }
+    // Extract Building City
+    const cityMatch = pageText.match(/Building City[:\s]+([\w\s]+?)(?=\s*Building County)/i);
+    if (cityMatch) {
+      info.buildingCity = cityMatch[1].trim();
+      log.info(`✅ Found Building City: ${info.buildingCity}`);
+    }
+
+    // Extract Building State
+    const stateMatch = pageText.match(/Building State[:\s]+([\w\s-]+?)(?=\s*Building Zip)/i);
+    if (stateMatch) {
+      info.buildingState = stateMatch[1].trim();
+      log.info(`✅ Found Building State: ${info.buildingState}`);
+    }
+
+    // Extract Building Zip
+    const zipMatch = pageText.match(/Building Zip[:\s]+(\d{5}(?:-\d{4})?)/i);
+    if (zipMatch) {
+      info.buildingZip = zipMatch[1].trim();
+      log.info(`✅ Found Building Zip: ${info.buildingZip}`);
     }
 
     // Log summary
@@ -345,6 +339,9 @@ async function extractCertificateInfo(page) {
     log.info(`   Approved At: ${info.approvedAt || 'NOT FOUND'}`);
     log.info(`   Expiration Date: ${info.expirationDate || 'NOT FOUND'}`);
     log.info(`   Building Address: ${info.buildingAddress || 'NOT FOUND'}`);
+    log.info(`   Building City: ${info.buildingCity || 'NOT FOUND'}`);
+    log.info(`   Building State: ${info.buildingState || 'NOT FOUND'}`);
+    log.info(`   Building Zip: ${info.buildingZip || 'NOT FOUND'}`);
     
     return info;
   } catch (e) {
@@ -722,6 +719,9 @@ async function run() {
             error: 'No download button found',
             fhNumber: fhNumber || null,
             buildingAddress: certInfo.buildingAddress || null,
+            buildingCity: certInfo.buildingCity || null,
+            buildingState: certInfo.buildingState || null,
+            buildingZip: certInfo.buildingZip || null,
             approvedAt: certInfo.approvedAt || null,
             expirationDate: certInfo.expirationDate || null,
             timestamp: new Date().toISOString(),
@@ -871,6 +871,9 @@ async function run() {
           // Certificate details
           fhNumber: fhNumber || null,
           buildingAddress: buildingAddress || null,
+          buildingCity: certInfo.buildingCity || null,
+          buildingState: certInfo.buildingState || null,
+          buildingZip: certInfo.buildingZip || null,
           approvedAt: approvedAt || null,
           expirationDate: expirationDate || null,
           
