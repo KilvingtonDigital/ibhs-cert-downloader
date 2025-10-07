@@ -1,4 +1,4 @@
-// src/main.js - DEBUG VERSION WITH ENHANCED EXTRACTION
+// src/main.js - CORRECTED VERSION - Wait for popup data to load
 import { Actor, log } from 'apify';
 import { chromium } from 'playwright';
 import fs from 'fs/promises';
@@ -72,298 +72,195 @@ async function captureAndSaveScreenshot(page, address, stage = 'final') {
   }
 }
 
-// ==================== DATA EXTRACTION WITH DEBUG ====================
+// ==================== DATA EXTRACTION FROM POPUP ====================
 
-async function extractCertificateData(page, address) {
+async function extractCertificateDataFromPopup(page, address) {
   const data = {
     fhNumber: null,
     approvedAt: null,
     expirationDate: null,
     buildingAddress: null,
-    extractionAttempts: {
-      fhNumber: [],
-      approvedAt: [],
-      expirationDate: [],
-      buildingAddress: []
-    },
-    debugInfo: {
-      modalFound: false,
-      modalSelector: null,
-      visibleElementsCount: 0,
-      datesFound: [],
-      labelsFound: {}
-    }
+    buildingCity: null,
+    buildingZip: null,
+    designation: null,
+    program: null,
+    status: null
   };
 
   try {
     log.info('');
     log.info('═'.repeat(70));
-    log.info('🔍 STARTING DEBUG DATA EXTRACTION');
+    log.info('🔍 EXTRACTING DATA FROM POPUP MODAL');
     log.info('═'.repeat(70));
     log.info('');
     
-    // Wait longer for content to stabilize
-    log.info('⏳ Waiting 8 seconds for modal to fully load...');
-    await page.waitForTimeout(8000);
+    // Wait for the popup content to change from search form to certificate details
+    // The key is waiting for specific certificate fields to appear
+    log.info('⏳ Waiting for certificate details to load in popup...');
     
-    // ==================== DEBUG SECTION 1: FIND THE MODAL ====================
-    log.info('');
-    log.info('📦 STEP 1: LOCATING MODAL CONTAINER');
-    log.info('─'.repeat(70));
+    // Wait for one of these elements that should appear in the certificate view
+    const certificateIndicators = [
+      'text=/Program/i',
+      'text=/Designation Level/i',
+      'text=/Approved/i',
+      'text=/Expiration/i',
+      'text=/FH\\d+/i',
+      'text=/FEH\\d+/i'
+    ];
     
+    let popupLoaded = false;
+    for (const indicator of certificateIndicators) {
+      try {
+        await page.waitForSelector(indicator, { timeout: 15000 });
+        log.info(`✅ Found certificate indicator: ${indicator}`);
+        popupLoaded = true;
+        break;
+      } catch (e) {
+        log.info(`   Indicator not found: ${indicator}`);
+      }
+    }
+    
+    if (!popupLoaded) {
+      log.warning('⚠️ Certificate details may not have loaded in popup');
+    }
+    
+    // Wait a bit more for all content to render
+    await page.waitForTimeout(5000);
+    
+    // Capture the popup HTML for debugging
     const modalSelectors = [
-      '[class*="create-home-evaluation-info-container"]',
-      '[class*="home-create-evaluation-dialog"]',
-      '[id*="home-create-evaluation-dialog"]',
-      '[class*="create-evaluation"]',
+      '#home-create-evaluation-dialog',
+      '[class*="create-home-evaluation"]',
       '[class*="evaluation-dialog"]',
-      '[id*="create-evaluation"]',
       '.e-dlg-content',
-      '[role="dialog"]',
-      '.ucl-dialog-container'
+      '[role="dialog"]'
     ];
     
     let modalHtml = null;
-    let modalSelector = null;
-    
     for (const selector of modalSelectors) {
       try {
         const element = page.locator(selector).first();
-        const count = await element.count();
-        
-        if (count > 0) {
-          const isVisible = await element.isVisible().catch(() => false);
-          log.info(`   ${selector}: ${count} found, visible: ${isVisible}`);
-          
-          if (isVisible && !modalHtml) {
-            modalHtml = await element.innerHTML();
-            modalSelector = selector;
-            data.debugInfo.modalFound = true;
-            data.debugInfo.modalSelector = selector;
-            log.info(`   ✅ SELECTED: ${selector}`);
-          }
-        } else {
-          log.info(`   ${selector}: not found`);
+        if (await element.count() > 0) {
+          modalHtml = await element.innerHTML();
+          log.info(`✅ Captured HTML from: ${selector}`);
+          break;
         }
       } catch (e) {
-        log.info(`   ${selector}: error - ${e.message}`);
+        // Continue
       }
     }
     
-    if (!modalHtml) {
-      log.warning('⚠️  No modal container found! Using full page HTML');
-      modalHtml = await page.content();
-    } else {
-      log.info(`✅ Modal found with selector: ${modalSelector}`);
+    if (modalHtml) {
+      // Save HTML for inspection
+      const htmlKey = `debug-popup-${sanitizeFileName(address)}-${Date.now()}.html`;
+      await Actor.setValue(htmlKey, modalHtml, { contentType: 'text/html' });
+      const kvStoreId = Actor.getEnv().defaultKeyValueStoreId;
+      const htmlUrl = `https://api.apify.com/v2/key-value-stores/${kvStoreId}/records/${htmlKey}`;
+      log.info(`💾 Popup HTML saved: ${htmlUrl}`);
+      
+      log.info(`📄 HTML Preview (first 2000 chars):`);
+      log.info(modalHtml.substring(0, 2000));
+      log.info('...');
     }
     
-    // Save HTML for inspection
-    const htmlKey = `debug-modal-${sanitizeFileName(address)}-${Date.now()}.html`;
-    await Actor.setValue(htmlKey, modalHtml, { contentType: 'text/html' });
-    const kvStoreId = Actor.getEnv().defaultKeyValueStoreId;
-    const htmlUrl = `https://api.apify.com/v2/key-value-stores/${kvStoreId}/records/${htmlKey}`;
-    log.info(`💾 HTML saved: ${htmlUrl}`);
-    
-    log.info(`📄 HTML Preview (first 1000 chars):`);
-    log.info(modalHtml.substring(0, 1000));
-    log.info('...');
-    
-    // ==================== DEBUG SECTION 2: LIST ALL VISIBLE TEXT ====================
+    // Get all text content from the popup
+    const popupText = await page.locator('[role="dialog"]').first().textContent().catch(() => '');
     log.info('');
-    log.info('📋 STEP 2: ANALYZING VISIBLE TEXT ELEMENTS');
-    log.info('─'.repeat(70));
+    log.info('📝 Full popup text content:');
+    log.info(popupText);
+    log.info('');
     
-    const allText = await page.evaluate(() => {
-      const elements = document.querySelectorAll('*');
-      const textElements = [];
+    // Try to find data in the popup using various strategies
+    log.info('🔍 Attempting data extraction...');
+    
+    // Strategy 1: Look for table within the popup
+    const popupTables = await page.locator('[role="dialog"] table').all();
+    log.info(`Found ${popupTables.length} table(s) in popup`);
+    
+    for (let i = 0; i < popupTables.length; i++) {
+      const table = popupTables[i];
+      const rows = await table.locator('tr').all();
+      log.info(`\nTable ${i + 1} in popup:`);
       
-      elements.forEach(el => {
-        const text = el.innerText?.trim();
-        if (text && text.length > 0 && text.length < 500) {
-          const rect = el.getBoundingClientRect();
-          // Check if element is visible
-          if (rect.width > 0 && rect.height > 0) {
-            textElements.push({
-              tag: el.tagName,
-              class: el.className,
-              id: el.id,
-              text: text
-            });
-          }
-        }
-      });
-      
-      return textElements;
-    });
-    
-    data.debugInfo.visibleElementsCount = allText.length;
-    log.info(`Found ${allText.length} visible text elements`);
-    log.info('');
-    log.info('First 30 visible elements:');
-    allText.slice(0, 30).forEach((el, i) => {
-      const classInfo = el.class ? ` class="${el.class.substring(0, 40)}"` : '';
-      const idInfo = el.id ? ` id="${el.id}"` : '';
-      log.info(`${String(i+1).padStart(3)}. <${el.tag}>${classInfo}${idInfo}`);
-      log.info(`     Text: "${el.text.substring(0, 100)}"`);
-    });
-    
-    // ==================== DEBUG SECTION 3: FIND ALL DATES ====================
-    log.info('');
-    log.info('📅 STEP 3: SEARCHING FOR DATE PATTERNS');
-    log.info('─'.repeat(70));
-    
-    const fullText = await page.textContent('body');
-    const normalizedText = fullText.replace(/\s+/g, ' ').trim();
-    
-    const datePatterns = [
-      /\d{1,2}\/\d{1,2}\/\d{4}/g,
-      /\d{1,2}-\d{1,2}-\d{4}/g,
-      /\d{4}-\d{1,2}-\d{1,2}/g
-    ];
-    
-    let allDates = [];
-    datePatterns.forEach((pattern, idx) => {
-      const matches = normalizedText.match(pattern) || [];
-      if (matches.length > 0) {
-        log.info(`Pattern ${idx + 1} (${pattern}): found ${matches.length} matches`);
-        log.info(`   Dates: ${matches.slice(0, 10).join(', ')}`);
-        allDates = [...allDates, ...matches];
-      }
-    });
-    
-    data.debugInfo.datesFound = [...new Set(allDates)];
-    log.info(`Total unique dates found: ${data.debugInfo.datesFound.length}`);
-    
-    // ==================== DEBUG SECTION 4: FIND FIELD LABELS ====================
-    log.info('');
-    log.info('🏷️  STEP 4: SEARCHING FOR FIELD LABELS');
-    log.info('─'.repeat(70));
-    
-    const fieldLabels = [
-      'FH', 'FEH', 'FH Number', 'FEH Number',
-      'Approved', 'Approval', 'Approved At', 'Approval Date', 'Date Approved',
-      'Expiration', 'Expires', 'Expiration Date', 'Expires On', 'Valid Until',
-      'Building Address', 'Address', 'Building Address 1', 'Building Address 2',
-      'Program', 'Designation Level', 'Building City', 'Building State',
-      'Hazard Type', 'Building Zip'
-    ];
-    
-    for (const label of fieldLabels) {
-      try {
-        const elements = await page.getByText(label, { exact: false }).all();
-        data.debugInfo.labelsFound[label] = elements.length;
+      for (let j = 0; j < rows.length; j++) {
+        const cells = await rows[j].locator('td, th').all();
+        const cellTexts = [];
         
-        if (elements.length > 0) {
-          log.info(`"${label}": found ${elements.length} match(es)`);
+        for (const cell of cells) {
+          const text = await cell.textContent();
+          cellTexts.push(text?.trim() || '');
+        }
+        
+        if (cellTexts.length > 0) {
+          log.info(`   Row ${j + 1}: [${cellTexts.join(' | ')}]`);
           
-          for (let i = 0; i < Math.min(elements.length, 2); i++) {
-            try {
-              const text = await elements[i].textContent();
-              const parent = elements[i].locator('xpath=..');
-              const parentText = await parent.textContent();
-              log.info(`   Match ${i+1}:`);
-              log.info(`      Element text: "${text}"`);
-              log.info(`      Parent text: "${parentText.substring(0, 150)}"`);
-            } catch (e) {
-              log.info(`   Match ${i+1}: error getting text - ${e.message}`);
+          // Try to extract data from this row
+          const rowText = cellTexts.join(' ');
+          
+          // Look for FH/FEH number
+          const fhMatch = rowText.match(/FE?H[\s:-]?\d{8,}/i);
+          if (fhMatch && !data.fhNumber) {
+            data.fhNumber = fhMatch[0].replace(/[\s:-]/g, '').toUpperCase();
+            log.info(`   ✓ Found FH Number: ${data.fhNumber}`);
+          }
+          
+          // Look for dates
+          const dateMatches = rowText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/g);
+          if (dateMatches) {
+            // Try to determine which date is which based on nearby text
+            for (let k = 0; k < cellTexts.length; k++) {
+              const cellText = cellTexts[k];
+              const prevCell = k > 0 ? cellTexts[k - 1] : '';
+              
+              if (/approved/i.test(prevCell) || /approved/i.test(cellText)) {
+                const dateMatch = cellText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
+                if (dateMatch && !data.approvedAt) {
+                  data.approvedAt = dateMatch[0];
+                  log.info(`   ✓ Found Approved Date: ${data.approvedAt}`);
+                }
+              }
+              
+              if (/expir/i.test(prevCell) || /expir/i.test(cellText)) {
+                const dateMatch = cellText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
+                if (dateMatch && !data.expirationDate) {
+                  data.expirationDate = dateMatch[0];
+                  log.info(`   ✓ Found Expiration Date: ${data.expirationDate}`);
+                }
+              }
             }
           }
         }
-      } catch (e) {
-        log.info(`"${label}": error - ${e.message}`);
       }
     }
     
-    // ==================== DEBUG SECTION 5: TABLE STRUCTURE ====================
-    log.info('');
-    log.info('📊 STEP 5: ANALYZING TABLE STRUCTURE');
-    log.info('─'.repeat(70));
-    
-    const tableInfo = await page.evaluate(() => {
-      const tables = document.querySelectorAll('table');
-      const tableData = [];
-      
-      tables.forEach((table, tableIdx) => {
-        const rows = table.querySelectorAll('tr');
-        const rowData = [];
-        
-        rows.forEach((row, rowIdx) => {
-          const cells = row.querySelectorAll('td, th');
-          const cellTexts = Array.from(cells).map(cell => cell.innerText?.trim() || '');
-          if (cellTexts.some(text => text.length > 0)) {
-            rowData.push(cellTexts);
-          }
-        });
-        
-        if (rowData.length > 0) {
-          tableData.push({
-            index: tableIdx,
-            rows: rowData
-          });
-        }
-      });
-      
-      return tableData;
-    });
-    
-    log.info(`Found ${tableInfo.length} table(s) with content`);
-    tableInfo.forEach((table, idx) => {
-      log.info(`\nTable ${table.index + 1}:`);
-      table.rows.forEach((row, rowIdx) => {
-        log.info(`   Row ${rowIdx + 1}: [${row.join(' | ')}]`);
-      });
-    });
-    
-    // ==================== EXTRACTION SECTION ====================
-    log.info('');
-    log.info('🎯 STEP 6: ATTEMPTING DATA EXTRACTION');
-    log.info('─'.repeat(70));
-    
-    // === EXTRACT FH NUMBER ===
-    log.info('');
-    log.info('🔢 Extracting FH/FEH Number...');
-    
-    const fhPatterns = [
-      /FE?H\d{8,}/gi,
-      /FE?H[\s-]?\d{8,}/gi,
-      /\b(FH|FEH)[\s:-]?(\d{8,})/gi
+    // Strategy 2: Look for labeled fields in the popup
+    const fieldLabels = [
+      { label: 'Program', field: 'program' },
+      { label: 'Designation Level', field: 'designation' },
+      { label: 'Building Address', field: 'buildingAddress' },
+      { label: 'Building City', field: 'buildingCity' },
+      { label: 'Building Zip', field: 'buildingZip' },
+      { label: 'Status', field: 'status' }
     ];
     
-    for (const pattern of fhPatterns) {
-      const matches = normalizedText.match(pattern);
-      if (matches && matches.length > 0) {
-        const fhNum = matches[0].replace(/[\s:-]/g, '').toUpperCase();
-        data.extractionAttempts.fhNumber.push({ 
-          strategy: `text_pattern_${pattern}`, 
-          value: fhNum 
-        });
-        if (!data.fhNumber) data.fhNumber = fhNum;
-        log.info(`   ✓ Found via pattern: ${fhNum}`);
-      }
-    }
-    
-    // Try DOM extraction for FH Number
-    const fhSelectors = [
-      'td:has-text("FH")',
-      'td:has-text("FEH")',
-      '[class*="fh"]',
-      'text=/FE?H[:\s-]?\\d{8,}/i'
-    ];
-    
-    for (const selector of fhSelectors) {
+    for (const { label, field } of fieldLabels) {
       try {
-        const element = page.locator(selector).first();
-        if (await element.count() > 0) {
-          const text = await element.textContent();
-          const match = text?.match(/FE?H[\s:-]?\d{8,}/i);
-          if (match) {
-            const fhNum = match[0].replace(/[\s:-]/g, '').toUpperCase();
-            data.extractionAttempts.fhNumber.push({ 
-              strategy: `dom_${selector}`, 
-              value: fhNum 
-            });
-            if (!data.fhNumber) data.fhNumber = fhNum;
-            log.info(`   ✓ Found via selector "${selector}": ${fhNum}`);
+        // Find the label element within the dialog
+        const labelElement = page.locator('[role="dialog"]').locator(`text=${label}`).first();
+        
+        if (await labelElement.count() > 0) {
+          // Try to find the value near the label
+          const parent = labelElement.locator('xpath=ancestor::tr[1]');
+          
+          if (await parent.count() > 0) {
+            const parentText = await parent.textContent();
+            // Remove the label from the text to get the value
+            const value = parentText.replace(label, '').trim();
+            
+            if (value && value.length > 0 && value.length < 200) {
+              data[field] = value;
+              log.info(`   ✓ Found ${label}: ${value}`);
+            }
           }
         }
       } catch (e) {
@@ -371,127 +268,31 @@ async function extractCertificateData(page, address) {
       }
     }
     
-    log.info(`   Result: ${data.fhNumber || '❌ NOT FOUND'} (${data.extractionAttempts.fhNumber.length} attempts)`);
-    
-    // === EXTRACT APPROVED AT DATE ===
-    log.info('');
-    log.info('📅 Extracting Approved At Date...');
-    
-    const approvedPatterns = [
-      /Approved\s+At\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Approved\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Approval\s+Date\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Date\s+Approved\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Approved[\s\S]{0,20}(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi
-    ];
-    
-    for (const pattern of approvedPatterns) {
-      const matches = [...normalizedText.matchAll(pattern)];
-      if (matches && matches.length > 0) {
-        const dateStr = matches[0][1];
-        data.extractionAttempts.approvedAt.push({ 
-          strategy: `text_pattern_${pattern}`, 
-          value: dateStr 
-        });
-        if (!data.approvedAt) data.approvedAt = dateStr;
-        log.info(`   ✓ Found via pattern: ${dateStr}`);
+    // Strategy 3: Use regex patterns on the full popup text
+    if (!data.fhNumber) {
+      const fhMatch = popupText.match(/FE?H[\s:-]?\d{8,}/i);
+      if (fhMatch) {
+        data.fhNumber = fhMatch[0].replace(/[\s:-]/g, '').toUpperCase();
+        log.info(`   ✓ Found FH Number in text: ${data.fhNumber}`);
       }
     }
     
-    // Try finding via table structure
-    try {
-      const approvedRow = await page.locator('tr:has-text("Approved")').first();
-      if (await approvedRow.count() > 0) {
-        const rowText = await approvedRow.textContent();
-        const dateMatch = rowText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
-        if (dateMatch) {
-          data.extractionAttempts.approvedAt.push({
-            strategy: 'table_row',
-            value: dateMatch[0]
-          });
-          if (!data.approvedAt) data.approvedAt = dateMatch[0];
-          log.info(`   ✓ Found via table row: ${dateMatch[0]}`);
-        }
-      }
-    } catch (e) {
-      // Continue
-    }
-    
-    log.info(`   Result: ${data.approvedAt || '❌ NOT FOUND'} (${data.extractionAttempts.approvedAt.length} attempts)`);
-    
-    // === EXTRACT EXPIRATION DATE ===
-    log.info('');
-    log.info('📅 Extracting Expiration Date...');
-    
-    const expirationPatterns = [
-      /Expiration\s+Date\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Expiration\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Expires?\s+On\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Expires?\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Valid\s+Until\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
-      /Expiration[\s\S]{0,20}(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi
-    ];
-    
-    for (const pattern of expirationPatterns) {
-      const matches = [...normalizedText.matchAll(pattern)];
-      if (matches && matches.length > 0) {
-        const dateStr = matches[0][1];
-        data.extractionAttempts.expirationDate.push({ 
-          strategy: `text_pattern_${pattern}`, 
-          value: dateStr 
-        });
-        if (!data.expirationDate) data.expirationDate = dateStr;
-        log.info(`   ✓ Found via pattern: ${dateStr}`);
+    if (!data.approvedAt) {
+      const approvedMatch = popupText.match(/Approved[^0-9]*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/i);
+      if (approvedMatch) {
+        data.approvedAt = approvedMatch[1];
+        log.info(`   ✓ Found Approved Date in text: ${data.approvedAt}`);
       }
     }
     
-    // Try finding via table structure
-    try {
-      const expirationRow = await page.locator('tr:has-text("Expiration")').first();
-      if (await expirationRow.count() > 0) {
-        const rowText = await expirationRow.textContent();
-        const dateMatch = rowText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
-        if (dateMatch) {
-          data.extractionAttempts.expirationDate.push({
-            strategy: 'table_row',
-            value: dateMatch[0]
-          });
-          if (!data.expirationDate) data.expirationDate = dateMatch[0];
-          log.info(`   ✓ Found via table row: ${dateMatch[0]}`);
-        }
-      }
-    } catch (e) {
-      // Continue
-    }
-    
-    log.info(`   Result: ${data.expirationDate || '❌ NOT FOUND'} (${data.extractionAttempts.expirationDate.length} attempts)`);
-    
-    // === EXTRACT BUILDING ADDRESS ===
-    log.info('');
-    log.info('🏠 Extracting Building Address...');
-    
-    const addressPatterns = [
-      /Building\s+Address\s*:?\s*(\d+\s+[A-Za-z0-9\s.,#-]+(?:Dr|Drive|Rd|Road|St|Street|Ave|Avenue|Ln|Lane|Way|Cir|Circle|Blvd|Boulevard|Ct|Court|Pl|Place)\.?\s*[NSEWnsew]?)/gi,
-      /Building\s+Address\s+1\s*:?\s*([^\n]+)/gi,
-      /Address\s*:?\s*(\d+\s+[A-Za-z0-9\s.,#-]+)/gi
-    ];
-    
-    for (const pattern of addressPatterns) {
-      const matches = [...normalizedText.matchAll(pattern)];
-      if (matches && matches.length > 0) {
-        const addressStr = matches[0][1].trim().replace(/\s+/g, ' ');
-        data.extractionAttempts.buildingAddress.push({ 
-          strategy: `text_pattern_${pattern}`, 
-          value: addressStr 
-        });
-        if (!data.buildingAddress) data.buildingAddress = addressStr;
-        log.info(`   ✓ Found via pattern: ${addressStr}`);
+    if (!data.expirationDate) {
+      const expirationMatch = popupText.match(/Expir[^0-9]*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/i);
+      if (expirationMatch) {
+        data.expirationDate = expirationMatch[1];
+        log.info(`   ✓ Found Expiration Date in text: ${data.expirationDate}`);
       }
     }
     
-    log.info(`   Result: ${data.buildingAddress || '❌ NOT FOUND'} (${data.extractionAttempts.buildingAddress.length} attempts)`);
-    
-    // === FINAL SUMMARY ===
     log.info('');
     log.info('═'.repeat(70));
     log.info('📊 EXTRACTION SUMMARY');
@@ -500,13 +301,15 @@ async function extractCertificateData(page, address) {
     log.info(`   Approved At:      ${data.approvedAt || '❌ NOT FOUND'}`);
     log.info(`   Expiration Date:  ${data.expirationDate || '❌ NOT FOUND'}`);
     log.info(`   Building Address: ${data.buildingAddress || '❌ NOT FOUND'}`);
+    log.info(`   Program:          ${data.program || '❌ NOT FOUND'}`);
+    log.info(`   Designation:      ${data.designation || '❌ NOT FOUND'}`);
     log.info('═'.repeat(70));
     log.info('');
     
     return data;
     
   } catch (e) {
-    log.error(`❌ Data extraction error: ${e.message}`);
+    log.error(`❌ Popup extraction error: ${e.message}`);
     log.error(`Stack: ${e.stack}`);
     return data;
   }
@@ -690,8 +493,7 @@ async function run() {
         buildingAddress: null,
         screenshot: null,
         certificateFile: null,
-        error: null,
-        debugInfo: {}
+        error: null
       };
 
       try {
@@ -739,51 +541,54 @@ async function run() {
         await page.waitForTimeout(3000);
 
         // Select first result
-        log.info('✅ Step 4: Selecting search result...');
+        log.info('✅ Step 4: Selecting search result (pressing Enter)...');
         await page.keyboard.press('Enter');
-        await page.waitForTimeout(3000);
+        
+        // CRITICAL: Wait longer for the popup to load the certificate details
+        log.info('⏳ Step 5: Waiting for popup to load certificate details...');
+        await page.waitForTimeout(10000); // Wait 10 seconds for data to load
         await page.waitForLoadState('networkidle', { timeout: 60000 });
 
-        // Wait for certificate info to load
-        log.info('⏳ Step 5: Waiting for certificate data to load...');
-        await page.waitForTimeout(5000);
-
-        // CAPTURE SCREENSHOT BEFORE EXTRACTION
-        log.info('📸 Step 6a: Capturing screenshot before extraction...');
-        const screenshotBefore = await captureAndSaveScreenshot(page, addr, 'before-extraction');
+        // Capture screenshot BEFORE extraction
+        log.info('📸 Step 6a: Capturing screenshot of loaded popup...');
+        const screenshotBefore = await captureAndSaveScreenshot(page, addr, 'popup-loaded');
         result.screenshotBefore = screenshotBefore.url;
 
-        // EXTRACT DATA WITH DEBUG
-        log.info('📊 Step 6b: Extracting data with debug...');
-        const extractedData = await extractCertificateData(page, addr);
-        result.fhNumber = extractedData.fhNumber;
-        result.approvedAt = extractedData.approvedAt;
-        result.expirationDate = extractedData.expirationDate;
-        result.buildingAddress = extractedData.buildingAddress;
-        result.debugInfo = extractedData.debugInfo;
-        result.extractionAttempts = extractedData.extractionAttempts;
+        // Extract data from the popup
+        log.info('📊 Step 6b: Extracting data from popup...');
+        const popupData = await extractCertificateDataFromPopup(page, addr);
+        
+        result.fhNumber = popupData.fhNumber;
+        result.approvedAt = popupData.approvedAt;
+        result.expirationDate = popupData.expirationDate;
+        result.buildingAddress = popupData.buildingAddress;
+        result.program = popupData.program;
+        result.designation = popupData.designation;
+        result.status = popupData.status;
 
-        // CAPTURE SCREENSHOT AFTER EXTRACTION
-        log.info('📸 Step 6c: Capturing screenshot after extraction...');
-        const screenshotAfter = await captureAndSaveScreenshot(page, addr, 'after-extraction');
-        result.screenshot = screenshotAfter.url;
-        result.screenshotKey = screenshotAfter.key;
+        // Capture screenshot AFTER extraction
+        log.info('📸 Step 6c: Capturing final screenshot...');
+        const screenshot = await captureAndSaveScreenshot(page, addr, 'after-extraction');
+        result.screenshot = screenshot.url;
+        result.screenshotKey = screenshot.key;
 
         // Try to download PDF
         log.info('📥 Step 7: Attempting PDF download...');
-        const modalContainer = page.locator('[class*="create-home-evaluation-info-container"]');
-        let downloadButton = modalContainer.getByText(/^\s*Download\s*$/i).first();
+        const downloadButton = page.locator('[role="dialog"]').getByText(/^\s*Download\s*$/i).first();
         
-        if (!(await downloadButton.count())) {
-          downloadButton = page.getByText(/^\s*Download\s*$/i).first();
-        }
-
-        if (await downloadButton.count()) {
+        if (await downloadButton.count() > 0) {
           const downloadPromise = page.waitForEvent('download', { timeout: 60_000 })
             .then(d => ({ kind: 'download', d }))
             .catch(() => null);
 
-          await downloadButton.click();
+          // Try to click with force if needed
+          try {
+            await downloadButton.click({ timeout: 5000 });
+          } catch (clickError) {
+            log.warning(`⚠️ Normal click failed, trying force click: ${clickError.message}`);
+            await downloadButton.click({ force: true });
+          }
+          
           const signal = await downloadPromise;
 
           if (signal?.kind === 'download') {
@@ -810,9 +615,11 @@ async function run() {
 
               log.info(`✅ PDF downloaded: ${kvKey} (${buffer.length} bytes)`);
             }
+          } else {
+            log.warning('⚠️ Download event did not trigger');
           }
         } else {
-          log.warning('⚠️ No download button found');
+          log.warning('⚠️ Download button not found in popup');
         }
 
         result.success = true;
@@ -852,6 +659,17 @@ async function run() {
       log.info(`   Screenshot:       ${result.screenshot ? '✅ SAVED' : '❌ FAILED'}`);
       log.info(`   Certificate:      ${result.certificateFile ? '✅ DOWNLOADED' : '⚠️ NOT AVAILABLE'}`);
       log.info('');
+
+      // Close any open dialogs before moving to next address
+      try {
+        const closeButton = page.locator('[role="dialog"] button[aria-label="Close"]').first();
+        if (await closeButton.count() > 0) {
+          await closeButton.click();
+          await page.waitForTimeout(1000);
+        }
+      } catch (e) {
+        // Continue
+      }
 
       // Return to main page
       await page.goto(loginUrl, { waitUntil: 'networkidle' });
