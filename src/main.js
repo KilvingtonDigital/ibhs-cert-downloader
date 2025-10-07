@@ -1,4 +1,4 @@
-// src/main.js - IMPROVED VERSION
+// src/main.js - DEBUG VERSION WITH ENHANCED EXTRACTION
 import { Actor, log } from 'apify';
 import { chromium } from 'playwright';
 import fs from 'fs/promises';
@@ -35,10 +35,6 @@ async function streamToBuffer(stream) {
 
 // ==================== SCREENSHOT CAPTURE ====================
 
-/**
- * ALWAYS capture a screenshot and save it to KVS
- * Returns the URL to access the screenshot
- */
 async function captureAndSaveScreenshot(page, address, stage = 'final') {
   try {
     const timestamp = Date.now();
@@ -47,13 +43,11 @@ async function captureAndSaveScreenshot(page, address, stage = 'final') {
     
     log.info(`📸 Capturing ${stage} screenshot for: ${address}`);
     
-    // Full page screenshot
     const png = await page.screenshot({ 
       fullPage: true,
       timeout: 30000 
     });
     
-    // Save to Key-Value Store
     await Actor.setValue(screenshotKey, png, { contentType: 'image/png' });
     
     const kvStoreId = Actor.getEnv().defaultKeyValueStoreId;
@@ -78,12 +72,9 @@ async function captureAndSaveScreenshot(page, address, stage = 'final') {
   }
 }
 
-// ==================== DATA EXTRACTION ====================
+// ==================== DATA EXTRACTION WITH DEBUG ====================
 
-/**
- * Enhanced extraction with multiple strategies and fallbacks
- */
-async function extractCertificateData(page) {
+async function extractCertificateData(page, address) {
   const data = {
     fhNumber: null,
     approvedAt: null,
@@ -94,44 +85,269 @@ async function extractCertificateData(page) {
       approvedAt: [],
       expirationDate: [],
       buildingAddress: []
+    },
+    debugInfo: {
+      modalFound: false,
+      modalSelector: null,
+      visibleElementsCount: 0,
+      datesFound: [],
+      labelsFound: {}
     }
   };
 
   try {
-    log.info('📋 Starting comprehensive data extraction...');
+    log.info('');
+    log.info('═'.repeat(70));
+    log.info('🔍 STARTING DEBUG DATA EXTRACTION');
+    log.info('═'.repeat(70));
+    log.info('');
     
-    // Wait for content to stabilize
-    await page.waitForTimeout(3000);
+    // Wait longer for content to stabilize
+    log.info('⏳ Waiting 8 seconds for modal to fully load...');
+    await page.waitForTimeout(8000);
     
-    // Get all page text
+    // ==================== DEBUG SECTION 1: FIND THE MODAL ====================
+    log.info('');
+    log.info('📦 STEP 1: LOCATING MODAL CONTAINER');
+    log.info('─'.repeat(70));
+    
+    const modalSelectors = [
+      '[class*="create-home-evaluation-info-container"]',
+      '[class*="home-create-evaluation-dialog"]',
+      '[id*="home-create-evaluation-dialog"]',
+      '[class*="create-evaluation"]',
+      '[class*="evaluation-dialog"]',
+      '[id*="create-evaluation"]',
+      '.e-dlg-content',
+      '[role="dialog"]',
+      '.ucl-dialog-container'
+    ];
+    
+    let modalHtml = null;
+    let modalSelector = null;
+    
+    for (const selector of modalSelectors) {
+      try {
+        const element = page.locator(selector).first();
+        const count = await element.count();
+        
+        if (count > 0) {
+          const isVisible = await element.isVisible().catch(() => false);
+          log.info(`   ${selector}: ${count} found, visible: ${isVisible}`);
+          
+          if (isVisible && !modalHtml) {
+            modalHtml = await element.innerHTML();
+            modalSelector = selector;
+            data.debugInfo.modalFound = true;
+            data.debugInfo.modalSelector = selector;
+            log.info(`   ✅ SELECTED: ${selector}`);
+          }
+        } else {
+          log.info(`   ${selector}: not found`);
+        }
+      } catch (e) {
+        log.info(`   ${selector}: error - ${e.message}`);
+      }
+    }
+    
+    if (!modalHtml) {
+      log.warning('⚠️  No modal container found! Using full page HTML');
+      modalHtml = await page.content();
+    } else {
+      log.info(`✅ Modal found with selector: ${modalSelector}`);
+    }
+    
+    // Save HTML for inspection
+    const htmlKey = `debug-modal-${sanitizeFileName(address)}-${Date.now()}.html`;
+    await Actor.setValue(htmlKey, modalHtml, { contentType: 'text/html' });
+    const kvStoreId = Actor.getEnv().defaultKeyValueStoreId;
+    const htmlUrl = `https://api.apify.com/v2/key-value-stores/${kvStoreId}/records/${htmlKey}`;
+    log.info(`💾 HTML saved: ${htmlUrl}`);
+    
+    log.info(`📄 HTML Preview (first 1000 chars):`);
+    log.info(modalHtml.substring(0, 1000));
+    log.info('...');
+    
+    // ==================== DEBUG SECTION 2: LIST ALL VISIBLE TEXT ====================
+    log.info('');
+    log.info('📋 STEP 2: ANALYZING VISIBLE TEXT ELEMENTS');
+    log.info('─'.repeat(70));
+    
+    const allText = await page.evaluate(() => {
+      const elements = document.querySelectorAll('*');
+      const textElements = [];
+      
+      elements.forEach(el => {
+        const text = el.innerText?.trim();
+        if (text && text.length > 0 && text.length < 500) {
+          const rect = el.getBoundingClientRect();
+          // Check if element is visible
+          if (rect.width > 0 && rect.height > 0) {
+            textElements.push({
+              tag: el.tagName,
+              class: el.className,
+              id: el.id,
+              text: text
+            });
+          }
+        }
+      });
+      
+      return textElements;
+    });
+    
+    data.debugInfo.visibleElementsCount = allText.length;
+    log.info(`Found ${allText.length} visible text elements`);
+    log.info('');
+    log.info('First 30 visible elements:');
+    allText.slice(0, 30).forEach((el, i) => {
+      const classInfo = el.class ? ` class="${el.class.substring(0, 40)}"` : '';
+      const idInfo = el.id ? ` id="${el.id}"` : '';
+      log.info(`${String(i+1).padStart(3)}. <${el.tag}>${classInfo}${idInfo}`);
+      log.info(`     Text: "${el.text.substring(0, 100)}"`);
+    });
+    
+    // ==================== DEBUG SECTION 3: FIND ALL DATES ====================
+    log.info('');
+    log.info('📅 STEP 3: SEARCHING FOR DATE PATTERNS');
+    log.info('─'.repeat(70));
+    
     const fullText = await page.textContent('body');
     const normalizedText = fullText.replace(/\s+/g, ' ').trim();
     
-    // === EXTRACT FH/FEH NUMBER ===
+    const datePatterns = [
+      /\d{1,2}\/\d{1,2}\/\d{4}/g,
+      /\d{1,2}-\d{1,2}-\d{4}/g,
+      /\d{4}-\d{1,2}-\d{1,2}/g
+    ];
+    
+    let allDates = [];
+    datePatterns.forEach((pattern, idx) => {
+      const matches = normalizedText.match(pattern) || [];
+      if (matches.length > 0) {
+        log.info(`Pattern ${idx + 1} (${pattern}): found ${matches.length} matches`);
+        log.info(`   Dates: ${matches.slice(0, 10).join(', ')}`);
+        allDates = [...allDates, ...matches];
+      }
+    });
+    
+    data.debugInfo.datesFound = [...new Set(allDates)];
+    log.info(`Total unique dates found: ${data.debugInfo.datesFound.length}`);
+    
+    // ==================== DEBUG SECTION 4: FIND FIELD LABELS ====================
+    log.info('');
+    log.info('🏷️  STEP 4: SEARCHING FOR FIELD LABELS');
+    log.info('─'.repeat(70));
+    
+    const fieldLabels = [
+      'FH', 'FEH', 'FH Number', 'FEH Number',
+      'Approved', 'Approval', 'Approved At', 'Approval Date', 'Date Approved',
+      'Expiration', 'Expires', 'Expiration Date', 'Expires On', 'Valid Until',
+      'Building Address', 'Address', 'Building Address 1', 'Building Address 2',
+      'Program', 'Designation Level', 'Building City', 'Building State',
+      'Hazard Type', 'Building Zip'
+    ];
+    
+    for (const label of fieldLabels) {
+      try {
+        const elements = await page.getByText(label, { exact: false }).all();
+        data.debugInfo.labelsFound[label] = elements.length;
+        
+        if (elements.length > 0) {
+          log.info(`"${label}": found ${elements.length} match(es)`);
+          
+          for (let i = 0; i < Math.min(elements.length, 2); i++) {
+            try {
+              const text = await elements[i].textContent();
+              const parent = elements[i].locator('xpath=..');
+              const parentText = await parent.textContent();
+              log.info(`   Match ${i+1}:`);
+              log.info(`      Element text: "${text}"`);
+              log.info(`      Parent text: "${parentText.substring(0, 150)}"`);
+            } catch (e) {
+              log.info(`   Match ${i+1}: error getting text - ${e.message}`);
+            }
+          }
+        }
+      } catch (e) {
+        log.info(`"${label}": error - ${e.message}`);
+      }
+    }
+    
+    // ==================== DEBUG SECTION 5: TABLE STRUCTURE ====================
+    log.info('');
+    log.info('📊 STEP 5: ANALYZING TABLE STRUCTURE');
+    log.info('─'.repeat(70));
+    
+    const tableInfo = await page.evaluate(() => {
+      const tables = document.querySelectorAll('table');
+      const tableData = [];
+      
+      tables.forEach((table, tableIdx) => {
+        const rows = table.querySelectorAll('tr');
+        const rowData = [];
+        
+        rows.forEach((row, rowIdx) => {
+          const cells = row.querySelectorAll('td, th');
+          const cellTexts = Array.from(cells).map(cell => cell.innerText?.trim() || '');
+          if (cellTexts.some(text => text.length > 0)) {
+            rowData.push(cellTexts);
+          }
+        });
+        
+        if (rowData.length > 0) {
+          tableData.push({
+            index: tableIdx,
+            rows: rowData
+          });
+        }
+      });
+      
+      return tableData;
+    });
+    
+    log.info(`Found ${tableInfo.length} table(s) with content`);
+    tableInfo.forEach((table, idx) => {
+      log.info(`\nTable ${table.index + 1}:`);
+      table.rows.forEach((row, rowIdx) => {
+        log.info(`   Row ${rowIdx + 1}: [${row.join(' | ')}]`);
+      });
+    });
+    
+    // ==================== EXTRACTION SECTION ====================
+    log.info('');
+    log.info('🎯 STEP 6: ATTEMPTING DATA EXTRACTION');
+    log.info('─'.repeat(70));
+    
+    // === EXTRACT FH NUMBER ===
+    log.info('');
     log.info('🔢 Extracting FH/FEH Number...');
     
-    // Strategy 1: Direct text pattern
     const fhPatterns = [
       /FE?H\d{8,}/gi,
-      /FE?H-?\d{8,}/gi,
-      /\b(FH|FEH)[\s-]?(\d{8,})/gi
+      /FE?H[\s-]?\d{8,}/gi,
+      /\b(FH|FEH)[\s:-]?(\d{8,})/gi
     ];
     
     for (const pattern of fhPatterns) {
       const matches = normalizedText.match(pattern);
       if (matches && matches.length > 0) {
-        const fhNum = matches[0].replace(/\s|-/g, '').toUpperCase();
-        data.extractionAttempts.fhNumber.push({ strategy: 'text_pattern', value: fhNum });
+        const fhNum = matches[0].replace(/[\s:-]/g, '').toUpperCase();
+        data.extractionAttempts.fhNumber.push({ 
+          strategy: `text_pattern_${pattern}`, 
+          value: fhNum 
+        });
         if (!data.fhNumber) data.fhNumber = fhNum;
+        log.info(`   ✓ Found via pattern: ${fhNum}`);
       }
     }
     
-    // Strategy 2: DOM elements
+    // Try DOM extraction for FH Number
     const fhSelectors = [
-      'text=/FE?H\\d+/i',
-      '[class*="fh"] >> text=/\\d{8,}/',
       'td:has-text("FH")',
-      'div:has-text("FH") >> text=/FE?H\\d+/i'
+      'td:has-text("FEH")',
+      '[class*="fh"]',
+      'text=/FE?H[:\s-]?\\d{8,}/i'
     ];
     
     for (const selector of fhSelectors) {
@@ -139,69 +355,124 @@ async function extractCertificateData(page) {
         const element = page.locator(selector).first();
         if (await element.count() > 0) {
           const text = await element.textContent();
-          const match = text?.match(/FE?H[\s-]?\d{8,}/i);
+          const match = text?.match(/FE?H[\s:-]?\d{8,}/i);
           if (match) {
-            const fhNum = match[0].replace(/\s|-/g, '').toUpperCase();
-            data.extractionAttempts.fhNumber.push({ strategy: `dom_${selector}`, value: fhNum });
+            const fhNum = match[0].replace(/[\s:-]/g, '').toUpperCase();
+            data.extractionAttempts.fhNumber.push({ 
+              strategy: `dom_${selector}`, 
+              value: fhNum 
+            });
             if (!data.fhNumber) data.fhNumber = fhNum;
+            log.info(`   ✓ Found via selector "${selector}": ${fhNum}`);
           }
         }
       } catch (e) {
-        // Continue to next strategy
+        // Continue
       }
     }
     
-    log.info(`   FH Number: ${data.fhNumber || 'NOT FOUND'} (${data.extractionAttempts.fhNumber.length} attempts)`);
+    log.info(`   Result: ${data.fhNumber || '❌ NOT FOUND'} (${data.extractionAttempts.fhNumber.length} attempts)`);
     
     // === EXTRACT APPROVED AT DATE ===
+    log.info('');
     log.info('📅 Extracting Approved At Date...');
     
     const approvedPatterns = [
-      /Approved\s+At\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi,
-      /Approved\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi,
-      /Approval\s+Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi,
-      /Date\s+Approved\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi
+      /Approved\s+At\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Approved\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Approval\s+Date\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Date\s+Approved\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Approved[\s\S]{0,20}(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi
     ];
     
     for (const pattern of approvedPatterns) {
       const matches = [...normalizedText.matchAll(pattern)];
       if (matches && matches.length > 0) {
         const dateStr = matches[0][1];
-        data.extractionAttempts.approvedAt.push({ strategy: 'text_pattern', value: dateStr });
+        data.extractionAttempts.approvedAt.push({ 
+          strategy: `text_pattern_${pattern}`, 
+          value: dateStr 
+        });
         if (!data.approvedAt) data.approvedAt = dateStr;
+        log.info(`   ✓ Found via pattern: ${dateStr}`);
       }
     }
     
-    log.info(`   Approved At: ${data.approvedAt || 'NOT FOUND'} (${data.extractionAttempts.approvedAt.length} attempts)`);
+    // Try finding via table structure
+    try {
+      const approvedRow = await page.locator('tr:has-text("Approved")').first();
+      if (await approvedRow.count() > 0) {
+        const rowText = await approvedRow.textContent();
+        const dateMatch = rowText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
+        if (dateMatch) {
+          data.extractionAttempts.approvedAt.push({
+            strategy: 'table_row',
+            value: dateMatch[0]
+          });
+          if (!data.approvedAt) data.approvedAt = dateMatch[0];
+          log.info(`   ✓ Found via table row: ${dateMatch[0]}`);
+        }
+      }
+    } catch (e) {
+      // Continue
+    }
+    
+    log.info(`   Result: ${data.approvedAt || '❌ NOT FOUND'} (${data.extractionAttempts.approvedAt.length} attempts)`);
     
     // === EXTRACT EXPIRATION DATE ===
+    log.info('');
     log.info('📅 Extracting Expiration Date...');
     
     const expirationPatterns = [
-      /Expiration\s+Date\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi,
-      /Expiration\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi,
-      /Expires?\s+On\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi,
-      /Expires?\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi,
-      /Valid\s+Until\s*:?\s*(\d{1,2}\/\d{1,2}\/\d{4})/gi
+      /Expiration\s+Date\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Expiration\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Expires?\s+On\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Expires?\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Valid\s+Until\s*:?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi,
+      /Expiration[\s\S]{0,20}(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/gi
     ];
     
     for (const pattern of expirationPatterns) {
       const matches = [...normalizedText.matchAll(pattern)];
       if (matches && matches.length > 0) {
         const dateStr = matches[0][1];
-        data.extractionAttempts.expirationDate.push({ strategy: 'text_pattern', value: dateStr });
+        data.extractionAttempts.expirationDate.push({ 
+          strategy: `text_pattern_${pattern}`, 
+          value: dateStr 
+        });
         if (!data.expirationDate) data.expirationDate = dateStr;
+        log.info(`   ✓ Found via pattern: ${dateStr}`);
       }
     }
     
-    log.info(`   Expiration Date: ${data.expirationDate || 'NOT FOUND'} (${data.extractionAttempts.expirationDate.length} attempts)`);
+    // Try finding via table structure
+    try {
+      const expirationRow = await page.locator('tr:has-text("Expiration")').first();
+      if (await expirationRow.count() > 0) {
+        const rowText = await expirationRow.textContent();
+        const dateMatch = rowText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
+        if (dateMatch) {
+          data.extractionAttempts.expirationDate.push({
+            strategy: 'table_row',
+            value: dateMatch[0]
+          });
+          if (!data.expirationDate) data.expirationDate = dateMatch[0];
+          log.info(`   ✓ Found via table row: ${dateMatch[0]}`);
+        }
+      }
+    } catch (e) {
+      // Continue
+    }
+    
+    log.info(`   Result: ${data.expirationDate || '❌ NOT FOUND'} (${data.extractionAttempts.expirationDate.length} attempts)`);
     
     // === EXTRACT BUILDING ADDRESS ===
+    log.info('');
     log.info('🏠 Extracting Building Address...');
     
     const addressPatterns = [
       /Building\s+Address\s*:?\s*(\d+\s+[A-Za-z0-9\s.,#-]+(?:Dr|Drive|Rd|Road|St|Street|Ave|Avenue|Ln|Lane|Way|Cir|Circle|Blvd|Boulevard|Ct|Court|Pl|Place)\.?\s*[NSEWnsew]?)/gi,
-      /Building\s+Address\s*:?\s*(\d+[^,\n]+)/gi,
+      /Building\s+Address\s+1\s*:?\s*([^\n]+)/gi,
       /Address\s*:?\s*(\d+\s+[A-Za-z0-9\s.,#-]+)/gi
     ];
     
@@ -209,26 +480,34 @@ async function extractCertificateData(page) {
       const matches = [...normalizedText.matchAll(pattern)];
       if (matches && matches.length > 0) {
         const addressStr = matches[0][1].trim().replace(/\s+/g, ' ');
-        data.extractionAttempts.buildingAddress.push({ strategy: 'text_pattern', value: addressStr });
+        data.extractionAttempts.buildingAddress.push({ 
+          strategy: `text_pattern_${pattern}`, 
+          value: addressStr 
+        });
         if (!data.buildingAddress) data.buildingAddress = addressStr;
+        log.info(`   ✓ Found via pattern: ${addressStr}`);
       }
     }
     
-    log.info(`   Building Address: ${data.buildingAddress || 'NOT FOUND'} (${data.extractionAttempts.buildingAddress.length} attempts)`);
+    log.info(`   Result: ${data.buildingAddress || '❌ NOT FOUND'} (${data.extractionAttempts.buildingAddress.length} attempts)`);
     
-    // === SUMMARY ===
+    // === FINAL SUMMARY ===
     log.info('');
-    log.info('📊 === EXTRACTION SUMMARY ===');
-    log.info(`   ✓ FH Number: ${data.fhNumber || '❌ NOT FOUND'}`);
-    log.info(`   ✓ Approved At: ${data.approvedAt || '❌ NOT FOUND'}`);
-    log.info(`   ✓ Expiration Date: ${data.expirationDate || '❌ NOT FOUND'}`);
-    log.info(`   ✓ Building Address: ${data.buildingAddress || '❌ NOT FOUND'}`);
+    log.info('═'.repeat(70));
+    log.info('📊 EXTRACTION SUMMARY');
+    log.info('═'.repeat(70));
+    log.info(`   FH Number:        ${data.fhNumber || '❌ NOT FOUND'}`);
+    log.info(`   Approved At:      ${data.approvedAt || '❌ NOT FOUND'}`);
+    log.info(`   Expiration Date:  ${data.expirationDate || '❌ NOT FOUND'}`);
+    log.info(`   Building Address: ${data.buildingAddress || '❌ NOT FOUND'}`);
+    log.info('═'.repeat(70));
     log.info('');
     
     return data;
     
   } catch (e) {
     log.error(`❌ Data extraction error: ${e.message}`);
+    log.error(`Stack: ${e.stack}`);
     return data;
   }
 }
@@ -411,7 +690,8 @@ async function run() {
         buildingAddress: null,
         screenshot: null,
         certificateFile: null,
-        error: null
+        error: null,
+        debugInfo: {}
       };
 
       try {
@@ -468,18 +748,26 @@ async function run() {
         log.info('⏳ Step 5: Waiting for certificate data to load...');
         await page.waitForTimeout(5000);
 
-        // EXTRACT DATA
-        const extractedData = await extractCertificateData(page);
+        // CAPTURE SCREENSHOT BEFORE EXTRACTION
+        log.info('📸 Step 6a: Capturing screenshot before extraction...');
+        const screenshotBefore = await captureAndSaveScreenshot(page, addr, 'before-extraction');
+        result.screenshotBefore = screenshotBefore.url;
+
+        // EXTRACT DATA WITH DEBUG
+        log.info('📊 Step 6b: Extracting data with debug...');
+        const extractedData = await extractCertificateData(page, addr);
         result.fhNumber = extractedData.fhNumber;
         result.approvedAt = extractedData.approvedAt;
         result.expirationDate = extractedData.expirationDate;
         result.buildingAddress = extractedData.buildingAddress;
+        result.debugInfo = extractedData.debugInfo;
+        result.extractionAttempts = extractedData.extractionAttempts;
 
-        // CAPTURE SCREENSHOT (ALWAYS)
-        log.info('📸 Step 6: Capturing final screenshot...');
-        const screenshot = await captureAndSaveScreenshot(page, addr, 'certificate-info');
-        result.screenshot = screenshot.url;
-        result.screenshotKey = screenshot.key;
+        // CAPTURE SCREENSHOT AFTER EXTRACTION
+        log.info('📸 Step 6c: Capturing screenshot after extraction...');
+        const screenshotAfter = await captureAndSaveScreenshot(page, addr, 'after-extraction');
+        result.screenshot = screenshotAfter.url;
+        result.screenshotKey = screenshotAfter.key;
 
         // Try to download PDF
         log.info('📥 Step 7: Attempting PDF download...');
@@ -532,7 +820,9 @@ async function run() {
 
       } catch (error) {
         log.error(`❌ Error processing ${addr}: ${error.message}`);
+        log.error(`Stack: ${error.stack}`);
         result.error = error.message;
+        result.errorStack = error.stack;
         result.status = 'error';
         
         // Capture error screenshot
@@ -555,11 +845,12 @@ async function run() {
 
       log.info('');
       log.info('📊 RESULT SUMMARY:');
-      log.info(`   FH Number: ${result.fhNumber || '❌ NOT FOUND'}`);
-      log.info(`   Approved At: ${result.approvedAt || '❌ NOT FOUND'}`);
-      log.info(`   Expiration Date: ${result.expirationDate || '❌ NOT FOUND'}`);
-      log.info(`   Screenshot: ${result.screenshot ? '✅ SAVED' : '❌ FAILED'}`);
-      log.info(`   Certificate: ${result.certificateFile ? '✅ DOWNLOADED' : '⚠️ NOT AVAILABLE'}`);
+      log.info(`   FH Number:        ${result.fhNumber || '❌ NOT FOUND'}`);
+      log.info(`   Approved At:      ${result.approvedAt || '❌ NOT FOUND'}`);
+      log.info(`   Expiration Date:  ${result.expirationDate || '❌ NOT FOUND'}`);
+      log.info(`   Building Address: ${result.buildingAddress || '❌ NOT FOUND'}`);
+      log.info(`   Screenshot:       ${result.screenshot ? '✅ SAVED' : '❌ FAILED'}`);
+      log.info(`   Certificate:      ${result.certificateFile ? '✅ DOWNLOADED' : '⚠️ NOT AVAILABLE'}`);
       log.info('');
 
       // Return to main page
