@@ -1,4 +1,4 @@
-// src/main.js - CORRECTED VERSION - Wait for popup data to load
+// src/main.js - FIXED VERSION with dropdown selection
 import { Actor, log } from 'apify';
 import { chromium } from 'playwright';
 import fs from 'fs/promises';
@@ -88,229 +88,124 @@ async function extractCertificateDataFromPopup(page, address) {
   };
 
   try {
-    log.info('');
-    log.info('═'.repeat(70));
-    log.info('🔍 EXTRACTING DATA FROM POPUP MODAL');
-    log.info('═'.repeat(70));
-    log.info('');
+    log.info('📊 Extracting data from popup modal...');
     
-    // Wait for the popup content to change from search form to certificate details
-    // The key is waiting for specific certificate fields to appear
-    log.info('⏳ Waiting for certificate details to load in popup...');
+    // Wait for popup content to stabilize
+    await page.waitForTimeout(3000);
     
-    // Wait for one of these elements that should appear in the certificate view
-    const certificateIndicators = [
-      'text=/Program/i',
-      'text=/Designation Level/i',
-      'text=/Approved/i',
-      'text=/Expiration/i',
-      'text=/FH\\d+/i',
-      'text=/FEH\\d+/i'
-    ];
+    // Get popup text content
+    const popupText = await page.locator('[role="dialog"]').textContent().catch(() => '');
     
-    let popupLoaded = false;
-    for (const indicator of certificateIndicators) {
-      try {
-        await page.waitForSelector(indicator, { timeout: 15000 });
-        log.info(`✅ Found certificate indicator: ${indicator}`);
-        popupLoaded = true;
-        break;
-      } catch (e) {
-        log.info(`   Indicator not found: ${indicator}`);
-      }
-    }
-    
-    if (!popupLoaded) {
-      log.warning('⚠️ Certificate details may not have loaded in popup');
-    }
-    
-    // Wait a bit more for all content to render
-    await page.waitForTimeout(5000);
-    
-    // Capture the popup HTML for debugging
-    const modalSelectors = [
-      '#home-create-evaluation-dialog',
-      '[class*="create-home-evaluation"]',
-      '[class*="evaluation-dialog"]',
-      '.e-dlg-content',
-      '[role="dialog"]'
-    ];
-    
-    let modalHtml = null;
-    for (const selector of modalSelectors) {
-      try {
-        const element = page.locator(selector).first();
-        if (await element.count() > 0) {
-          modalHtml = await element.innerHTML();
-          log.info(`✅ Captured HTML from: ${selector}`);
-          break;
-        }
-      } catch (e) {
-        // Continue
-      }
-    }
-    
-    if (modalHtml) {
-      // Save HTML for inspection
-      const htmlKey = `debug-popup-${sanitizeFileName(address)}-${Date.now()}.html`;
+    // Save popup HTML for debugging if needed
+    try {
+      const modalHtml = await page.locator('[role="dialog"]').innerHTML();
+      const htmlKey = `popup-html-${sanitizeFileName(address)}-${Date.now()}.html`;
       await Actor.setValue(htmlKey, modalHtml, { contentType: 'text/html' });
-      const kvStoreId = Actor.getEnv().defaultKeyValueStoreId;
-      const htmlUrl = `https://api.apify.com/v2/key-value-stores/${kvStoreId}/records/${htmlKey}`;
-      log.info(`💾 Popup HTML saved: ${htmlUrl}`);
-      
-      log.info(`📄 HTML Preview (first 2000 chars):`);
-      log.info(modalHtml.substring(0, 2000));
-      log.info('...');
+    } catch (e) {
+      // Continue even if we can't save HTML
     }
     
-    // Get all text content from the popup
-    const popupText = await page.locator('[role="dialog"]').first().textContent().catch(() => '');
-    log.info('');
-    log.info('📝 Full popup text content:');
-    log.info(popupText);
-    log.info('');
-    
-    // Try to find data in the popup using various strategies
-    log.info('🔍 Attempting data extraction...');
-    
-    // Strategy 1: Look for table within the popup
-    const popupTables = await page.locator('[role="dialog"] table').all();
-    log.info(`Found ${popupTables.length} table(s) in popup`);
-    
-    for (let i = 0; i < popupTables.length; i++) {
-      const table = popupTables[i];
-      const rows = await table.locator('tr').all();
-      log.info(`\nTable ${i + 1} in popup:`);
-      
-      for (let j = 0; j < rows.length; j++) {
-        const cells = await rows[j].locator('td, th').all();
-        const cellTexts = [];
-        
-        for (const cell of cells) {
-          const text = await cell.textContent();
-          cellTexts.push(text?.trim() || '');
-        }
-        
-        if (cellTexts.length > 0) {
-          log.info(`   Row ${j + 1}: [${cellTexts.join(' | ')}]`);
-          
-          // Try to extract data from this row
-          const rowText = cellTexts.join(' ');
-          
-          // Look for FH/FEH number
-          const fhMatch = rowText.match(/FE?H[\s:-]?\d{8,}/i);
-          if (fhMatch && !data.fhNumber) {
-            data.fhNumber = fhMatch[0].replace(/[\s:-]/g, '').toUpperCase();
-            log.info(`   ✓ Found FH Number: ${data.fhNumber}`);
-          }
-          
-          // Look for dates
-          const dateMatches = rowText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/g);
-          if (dateMatches) {
-            // Try to determine which date is which based on nearby text
-            for (let k = 0; k < cellTexts.length; k++) {
-              const cellText = cellTexts[k];
-              const prevCell = k > 0 ? cellTexts[k - 1] : '';
-              
-              if (/approved/i.test(prevCell) || /approved/i.test(cellText)) {
-                const dateMatch = cellText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
-                if (dateMatch && !data.approvedAt) {
-                  data.approvedAt = dateMatch[0];
-                  log.info(`   ✓ Found Approved Date: ${data.approvedAt}`);
-                }
-              }
-              
-              if (/expir/i.test(prevCell) || /expir/i.test(cellText)) {
-                const dateMatch = cellText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
-                if (dateMatch && !data.expirationDate) {
-                  data.expirationDate = dateMatch[0];
-                  log.info(`   ✓ Found Expiration Date: ${data.expirationDate}`);
-                }
-              }
-            }
-          }
-        }
-      }
+    // Extract FH/FEH Number
+    const fhMatch = popupText.match(/FE?H[\s:-]?\d{8,}/i);
+    if (fhMatch) {
+      data.fhNumber = fhMatch[0].replace(/[\s:-]/g, '').toUpperCase();
+      log.info(`   ✓ FH Number: ${data.fhNumber}`);
     }
     
-    // Strategy 2: Look for labeled fields in the popup
-    const fieldLabels = [
-      { label: 'Program', field: 'program' },
-      { label: 'Designation Level', field: 'designation' },
-      { label: 'Building Address', field: 'buildingAddress' },
-      { label: 'Building City', field: 'buildingCity' },
-      { label: 'Building Zip', field: 'buildingZip' },
-      { label: 'Status', field: 'status' }
-    ];
-    
-    for (const { label, field } of fieldLabels) {
-      try {
-        // Find the label element within the dialog
-        const labelElement = page.locator('[role="dialog"]').locator(`text=${label}`).first();
+    // Extract dates using table structure
+    try {
+      const popupTables = await page.locator('[role="dialog"] table').all();
+      
+      for (const table of popupTables) {
+        const rows = await table.locator('tr').all();
         
-        if (await labelElement.count() > 0) {
-          // Try to find the value near the label
-          const parent = labelElement.locator('xpath=ancestor::tr[1]');
+        for (const row of rows) {
+          const cells = await row.locator('td, th').all();
+          const cellTexts = [];
           
-          if (await parent.count() > 0) {
-            const parentText = await parent.textContent();
-            // Remove the label from the text to get the value
-            const value = parentText.replace(label, '').trim();
+          for (const cell of cells) {
+            const text = await cell.textContent();
+            cellTexts.push(text?.trim() || '');
+          }
+          
+          // Look for date patterns in cells
+          for (let i = 0; i < cellTexts.length; i++) {
+            const cellText = cellTexts[i];
+            const prevCell = i > 0 ? cellTexts[i - 1] : '';
             
-            if (value && value.length > 0 && value.length < 200) {
-              data[field] = value;
-              log.info(`   ✓ Found ${label}: ${value}`);
+            // Check for Approved Date
+            if (/approved/i.test(prevCell) || /approved/i.test(cellText)) {
+              const dateMatch = cellText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
+              if (dateMatch && !data.approvedAt) {
+                data.approvedAt = dateMatch[0];
+                log.info(`   ✓ Approved At: ${data.approvedAt}`);
+              }
+            }
+            
+            // Check for Expiration Date
+            if (/expir/i.test(prevCell) || /expir/i.test(cellText)) {
+              const dateMatch = cellText.match(/\d{1,2}[\/-]\d{1,2}[\/-]\d{4}/);
+              if (dateMatch && !data.expirationDate) {
+                data.expirationDate = dateMatch[0];
+                log.info(`   ✓ Expiration Date: ${data.expirationDate}`);
+              }
             }
           }
         }
-      } catch (e) {
-        // Continue
       }
+    } catch (e) {
+      log.warning(`Table extraction error: ${e.message}`);
     }
     
-    // Strategy 3: Use regex patterns on the full popup text
-    if (!data.fhNumber) {
-      const fhMatch = popupText.match(/FE?H[\s:-]?\d{8,}/i);
-      if (fhMatch) {
-        data.fhNumber = fhMatch[0].replace(/[\s:-]/g, '').toUpperCase();
-        log.info(`   ✓ Found FH Number in text: ${data.fhNumber}`);
-      }
-    }
-    
+    // Fallback: Extract dates from text with context
     if (!data.approvedAt) {
-      const approvedMatch = popupText.match(/Approved[^0-9]*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/i);
+      const approvedMatch = popupText.match(/Approved[^0-9]{0,20}(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/i);
       if (approvedMatch) {
         data.approvedAt = approvedMatch[1];
-        log.info(`   ✓ Found Approved Date in text: ${data.approvedAt}`);
+        log.info(`   ✓ Approved At (text): ${data.approvedAt}`);
       }
     }
     
     if (!data.expirationDate) {
-      const expirationMatch = popupText.match(/Expir[^0-9]*(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/i);
+      const expirationMatch = popupText.match(/Expir[^0-9]{0,20}(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})/i);
       if (expirationMatch) {
         data.expirationDate = expirationMatch[1];
-        log.info(`   ✓ Found Expiration Date in text: ${data.expirationDate}`);
+        log.info(`   ✓ Expiration Date (text): ${data.expirationDate}`);
       }
     }
     
+    // Extract Building Address
+    const addressMatch = popupText.match(/Building\s+Address[:\s]*([^\n]{10,100})/i);
+    if (addressMatch) {
+      data.buildingAddress = addressMatch[1].trim();
+      log.info(`   ✓ Building Address: ${data.buildingAddress}`);
+    }
+    
+    // Extract other fields
+    const programMatch = popupText.match(/Program[:\s]*([^\n]{3,50})/i);
+    if (programMatch) {
+      data.program = programMatch[1].trim();
+      log.info(`   ✓ Program: ${data.program}`);
+    }
+    
+    const designationMatch = popupText.match(/Designation\s+Level[:\s]*([^\n]{3,30})/i);
+    if (designationMatch) {
+      data.designation = designationMatch[1].trim();
+      log.info(`   ✓ Designation: ${data.designation}`);
+    }
+    
     log.info('');
-    log.info('═'.repeat(70));
-    log.info('📊 EXTRACTION SUMMARY');
-    log.info('═'.repeat(70));
+    log.info('📊 Extraction Summary:');
     log.info(`   FH Number:        ${data.fhNumber || '❌ NOT FOUND'}`);
     log.info(`   Approved At:      ${data.approvedAt || '❌ NOT FOUND'}`);
     log.info(`   Expiration Date:  ${data.expirationDate || '❌ NOT FOUND'}`);
     log.info(`   Building Address: ${data.buildingAddress || '❌ NOT FOUND'}`);
-    log.info(`   Program:          ${data.program || '❌ NOT FOUND'}`);
-    log.info(`   Designation:      ${data.designation || '❌ NOT FOUND'}`);
-    log.info('═'.repeat(70));
     log.info('');
     
     return data;
     
   } catch (e) {
     log.error(`❌ Popup extraction error: ${e.message}`);
-    log.error(`Stack: ${e.stack}`);
     return data;
   }
 }
@@ -491,6 +386,8 @@ async function run() {
         approvedAt: null,
         expirationDate: null,
         buildingAddress: null,
+        program: null,
+        designation: null,
         screenshot: null,
         certificateFile: null,
         error: null
@@ -534,28 +431,59 @@ async function run() {
         await page.waitForTimeout(500);
         
         // Type address character by character
+        log.info('⌨️ Typing address...');
         for (const char of addr) {
           await searchField.type(char, { delay: jitter(80, 60) });
         }
         
+        // CRITICAL FIX: Wait for dropdown and click result instead of pressing Enter
+        log.info('⏳ Waiting for dropdown results...');
         await page.waitForTimeout(3000);
 
-        // Select first result
-        log.info('✅ Step 4: Selecting search result (pressing Enter)...');
-        await page.keyboard.press('Enter');
+        // Try to find and click dropdown item
+        log.info('🖱️ Looking for dropdown results...');
+        const dropdownSelectors = [
+          '.e-popup.e-popup-open .e-list-item',
+          '.e-dropdownbase .e-list-item',
+          '[role="listbox"] [role="option"]',
+          '.e-autocomplete .e-list-item',
+          'ul.e-list-parent li',
+          '.bp5-menu-item'
+        ];
         
-        // CRITICAL: Wait longer for the popup to load the certificate details
-        log.info('⏳ Step 5: Waiting for popup to load certificate details...');
-        await page.waitForTimeout(10000); // Wait 10 seconds for data to load
+        let clicked = false;
+        for (const selector of dropdownSelectors) {
+          const items = await page.locator(selector).all();
+          
+          if (items.length > 0) {
+            log.info(`✅ Found ${items.length} dropdown items with selector: ${selector}`);
+            log.info('🖱️ Clicking first dropdown result...');
+            await items[0].click();
+            clicked = true;
+            break;
+          }
+        }
+        
+        if (!clicked) {
+          log.warning('⚠️ No dropdown found, using keyboard navigation...');
+          await page.keyboard.press('ArrowDown');
+          await page.waitForTimeout(500);
+          await page.keyboard.press('Enter');
+        }
+        
+        // Wait for popup to load certificate details
+        log.info('⏳ Step 4: Waiting for popup to load certificate details...');
+        await page.waitForTimeout(8000);
         await page.waitForLoadState('networkidle', { timeout: 60000 });
 
-        // Capture screenshot BEFORE extraction
-        log.info('📸 Step 6a: Capturing screenshot of loaded popup...');
-        const screenshotBefore = await captureAndSaveScreenshot(page, addr, 'popup-loaded');
-        result.screenshotBefore = screenshotBefore.url;
+        // Capture screenshot
+        log.info('📸 Step 5: Capturing screenshot...');
+        const screenshot = await captureAndSaveScreenshot(page, addr, 'certificate-loaded');
+        result.screenshot = screenshot.url;
+        result.screenshotKey = screenshot.key;
 
-        // Extract data from the popup
-        log.info('📊 Step 6b: Extracting data from popup...');
+        // Extract data from popup
+        log.info('📊 Step 6: Extracting data from popup...');
         const popupData = await extractCertificateDataFromPopup(page, addr);
         
         result.fhNumber = popupData.fhNumber;
@@ -564,13 +492,6 @@ async function run() {
         result.buildingAddress = popupData.buildingAddress;
         result.program = popupData.program;
         result.designation = popupData.designation;
-        result.status = popupData.status;
-
-        // Capture screenshot AFTER extraction
-        log.info('📸 Step 6c: Capturing final screenshot...');
-        const screenshot = await captureAndSaveScreenshot(page, addr, 'after-extraction');
-        result.screenshot = screenshot.url;
-        result.screenshotKey = screenshot.key;
 
         // Try to download PDF
         log.info('📥 Step 7: Attempting PDF download...');
@@ -581,11 +502,10 @@ async function run() {
             .then(d => ({ kind: 'download', d }))
             .catch(() => null);
 
-          // Try to click with force if needed
           try {
             await downloadButton.click({ timeout: 5000 });
           } catch (clickError) {
-            log.warning(`⚠️ Normal click failed, trying force click: ${clickError.message}`);
+            log.warning(`⚠️ Normal click failed, trying force click`);
             await downloadButton.click({ force: true });
           }
           
@@ -615,8 +535,6 @@ async function run() {
 
               log.info(`✅ PDF downloaded: ${kvKey} (${buffer.length} bytes)`);
             }
-          } else {
-            log.warning('⚠️ Download event did not trigger');
           }
         } else {
           log.warning('⚠️ Download button not found in popup');
@@ -627,9 +545,7 @@ async function run() {
 
       } catch (error) {
         log.error(`❌ Error processing ${addr}: ${error.message}`);
-        log.error(`Stack: ${error.stack}`);
         result.error = error.message;
-        result.errorStack = error.stack;
         result.status = 'error';
         
         // Capture error screenshot
@@ -660,7 +576,7 @@ async function run() {
       log.info(`   Certificate:      ${result.certificateFile ? '✅ DOWNLOADED' : '⚠️ NOT AVAILABLE'}`);
       log.info('');
 
-      // Close any open dialogs before moving to next address
+      // Close any open dialogs
       try {
         const closeButton = page.locator('[role="dialog"] button[aria-label="Close"]').first();
         if (await closeButton.count() > 0) {
